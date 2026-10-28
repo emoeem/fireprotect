@@ -59,8 +59,26 @@ const me = await runtime.api.call<{ username?: string; id: number }>("getMe");
 if (me.ok) console.log(`焰卫已上线：@${me.result.username} (${me.result.id}) · db=${process.env.BOT_DB ?? "bot.db"}`);
 else console.error(`getMe 失败：${me.error}`);
 
-// Drop any webhook: Telegram refuses `getUpdates` while one is registered.
-await runtime.api.call("deleteWebhook", { drop_pending_updates: false });
+/**
+ * Telegram refuses `getUpdates` while a webhook is registered, so long polling
+ * needs it removed first. Doing that automatically would silently take a
+ * deployed Worker offline — a local `npm run dev` must not break production, so
+ * the removal is explicit.
+ */
+const hook = await runtime.api.call<{ url?: string }>("getWebhookInfo");
+if (hook.ok && hook.result.url) {
+  if (process.env.DROP_WEBHOOK === "1") {
+    await runtime.api.call("deleteWebhook", { drop_pending_updates: false });
+    console.log(`已移除 webhook（原 ${hook.result.url}）`);
+  } else {
+    console.error(
+      `已存在 webhook：${hook.result.url}\n` +
+        "  · 本机会收到 409 Conflict，收不到任何更新；\n" +
+        "  · 确认要改用长轮询，加 DROP_WEBHOOK=1 再启动（会摘掉线上 webhook）。",
+    );
+    process.exit(1);
+  }
+}
 
 let running = true;
 const stop = () => {
