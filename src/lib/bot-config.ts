@@ -110,6 +110,9 @@ export function cleanHost(raw: string): string {
   return raw
     .trim()
     .replace(/^https?:\/\//i, "")
+    // `a@evil.com` is a valid URL with userinfo: https://a@evil.com/... sends
+    // the ?key= to evil.com, so the userinfo part never survives cleaning.
+    .replace(/^[^/@]*@/, "")
     .replace(/\/.*$/, "")
     .replace(/\s/g, "");
 }

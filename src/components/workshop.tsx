@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import { adminIdList, installUrl, presets, type BotConfig } from "@/lib/bot-config";
 import { generateWorker, ruleSummary } from "@/lib/generate-worker";
+import { FLAGS } from "@/lib/flags";
+import { sortIssues, validateConfig } from "@/lib/validate-config";
 import { useBotStore } from "@/lib/store";
 import { checkBotToken } from "@/lib/telegram.functions";
 
@@ -59,8 +61,15 @@ export function Workshop() {
   >({ kind: "idle" });
 
   useEffect(() => {
-    void useBotStore.persist.rehydrate();
-    setReady(true);
+    // `ready` means "the stored config has landed": the code preview reads
+    // better once it stops showing defaults that are about to be replaced.
+    let alive = true;
+    void Promise.resolve(useBotStore.persist.rehydrate()).finally(() => {
+      if (alive) setReady(true);
+    });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const worker = useMemo(() => generateWorker(config), [config]);
@@ -68,6 +77,8 @@ export function Workshop() {
   const ids = adminIdList(config.adminIds);
   const link = installUrl(config);
   const idPaste = ids.join(",");
+  const report = useMemo(() => validateConfig(config), [config]);
+  const shownIssues = useMemo(() => sortIssues(report.issues).slice(0, 8), [report]);
 
   async function copy(id: string, text: string) {
     try {
@@ -85,8 +96,12 @@ export function Workshop() {
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = "worker.js";
+    document.body.appendChild(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
+    anchor.remove();
+    // Revoking synchronously can cancel the download in some browsers; the
+    // object URL is cheap, so give the fetch a tick to start.
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
   }
 
   async function testToken() {
@@ -449,6 +464,47 @@ export function Workshop() {
           ) : null}
           {tokenState.kind === "error" ? (
             <p className="mt-3 text-sm text-ember">{tokenState.message}</p>
+          ) : null}
+
+          {FLAGS.configDoctor && report.issues.length > 0 ? (
+            <div className="mt-5 rounded-2xl border border-line bg-ink p-4">
+              <p className="flex items-start gap-2 text-sm">
+                <TriangleAlert className="mt-0.5 size-4 shrink-0 text-ember" />
+                <span>
+                  部署前检查：
+                  {[
+                    report.counts.error > 0 ? `${report.counts.error} 项必须改` : "",
+                    report.counts.warn > 0 ? `${report.counts.warn} 项建议改` : "",
+                    report.counts.info > 0 ? `${report.counts.info} 项提示` : "",
+                  ]
+                    .filter(Boolean)
+                    .join("，")}
+                  。改完这里会跟着消失。
+                </span>
+              </p>
+              <ul className="mt-3 grid gap-2 text-sm">
+                {shownIssues.map((item) => (
+                  <li key={item.code + item.message} className="flex gap-2">
+                    <span
+                      className={
+                        "mt-0.5 shrink-0 rounded-md px-1.5 py-0.5 text-xs " +
+                        (item.severity === "error"
+                          ? "bg-ember text-ember-ink"
+                          : item.severity === "warn"
+                            ? "border border-ember text-ember"
+                            : "border border-line text-muted")
+                      }
+                    >
+                      {item.severity === "error" ? "必须改" : item.severity === "warn" ? "建议" : "提示"}
+                    </span>
+                    <span className="text-muted">{item.message}</span>
+                  </li>
+                ))}
+              </ul>
+              {report.issues.length > shownIssues.length ? (
+                <p className="mt-2 text-sm text-muted">还有 {report.issues.length - shownIssues.length} 条，改完上面这些再看。</p>
+              ) : null}
+            </div>
           ) : null}
 
           <div className="mt-5 flex flex-wrap gap-2">

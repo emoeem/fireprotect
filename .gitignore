@@ -21,3 +21,4 @@ dist/
 # editor / OS
 .DS_Store
 *.swp
+.grok/preview.pid
