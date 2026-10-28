@@ -155,3 +155,13 @@ test("the Node entry exists and is where injection happens", () => {
   const text = readFileSync(NODE_ENTRY, "utf8");
   assert.match(text, /sliceImage/, "node.ts is the injection point; if this changed, the boundary moved");
 });
+
+test("the Worker wires the real KV store, not the in-memory fallback", () => {
+  // The production incident: createRuntime ran without `store`, so every KV
+  // write went to an in-memory Map and evaporated with the isolate — configs,
+  // verifications and login codes included. This guard exists so the fallback
+  // can never silently come back.
+  const text = readFileSync(WORKER_ENTRY, "utf8");
+  assert.match(text, /kvStore\(env\.STORE\)/, "worker.ts must pass kvStore(env.STORE) into createRuntime");
+  assert.match(text, /env\.STORE/, "worker.ts must check the STORE binding before building the runtime");
+});

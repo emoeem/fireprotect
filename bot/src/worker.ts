@@ -12,6 +12,7 @@
 import { handleUpdate } from "./bot.ts";
 import { createRuntime, ensureSchema, type Runtime } from "./context.ts";
 import { openD1 } from "./db/d1.ts";
+import { kvStore } from "./store.ts";
 import { handleInstall, healthBody, webhookSecret } from "./install.ts";
 import { sweepExpired } from "./handlers/verify.ts";
 import { handleApi } from "./admin/api.ts";
@@ -32,8 +33,15 @@ function runtimeFor(env: Env): Runtime {
   if (!env.DB) {
     throw new Error("D1 绑定 DB 缺失：在 wrangler.toml 里配置 d1_databases 并执行 wrangler d1 create");
   }
+  if (!env.STORE) {
+    throw new Error("KV 绑定 STORE 缺失：在 wrangler.toml 里配置 kv_namespaces 并重新部署");
+  }
   const sqlite = openD1(env.DB);
-  const runtime = createRuntime(env, { sqlite });
+  // The KV namespace IS the durable half of the hot state (configs, pending
+  // verifications, login codes). Falling back to an in-memory store here would
+  // "work" until the isolate recycles and silently wipe every group's settings —
+  // which is exactly what production was doing before this line existed.
+  const runtime = createRuntime(env, { sqlite, store: kvStore(env.STORE) });
   cached = { env, runtime };
   return runtime;
 }
@@ -48,6 +56,7 @@ export default {
       try {
         const runtime = runtimeFor(env);
         await ensureSchema(runtime.sql);
+        return json(body);
       } catch (err) {
         return json({ ...body, ok: false, error: err instanceof Error ? err.message : String(err) }, 503);
       }
