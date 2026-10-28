@@ -1,0 +1,44 @@
+name: bot
+
+# bot/ is a self-contained package, but its `verify` script reaches for the
+# workspace root: `tsc` and `eslint` are root devDependencies (bot's own
+# devDependencies do not carry them), and the flat eslint config lives at the
+# root. Both installs are therefore required — installing bot/ alone fails.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bot/**"
+      - "package-lock.json"
+      - ".github/workflows/bot.yml"
+  pull_request:
+    paths:
+      - "bot/**"
+      - "package-lock.json"
+      - ".github/workflows/bot.yml"
+
+concurrency:
+  group: bot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            bot/package-lock.json
+            package-lock.json
+      - name: Install workspace dependencies (tsc/eslint binaries)
+        run: npm ci
+      - name: Install bot dependencies
+        run: npm ci
+        working-directory: bot
+      - name: Verify (typecheck, lint, coverage gate)
+        run: npm run verify
+        working-directory: bot
