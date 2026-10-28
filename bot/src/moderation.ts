@@ -1,60 +1,30 @@
-import type { Ctx } from "./context.ts";
-import { PERMS_MEMBER, PERMS_MUTED } from "./context.ts";
-import type { ChatRules } from "./rules.ts";
-import { displayName, escapeHtml } from "./telegram.ts";
+/**
+ * Moderation actions.
+ *
+ * Every Telegram call goes through here so three things stay true everywhere:
+ *  - `until_date` is clamped (`untilDate`), because Telegram silently turns a
+ *    sub-30-second mute into a permanent one;
+ *  - each step is independent: one failed `deleteMessage` never cancels a ban;
+ *  - every action is recorded once — in SQL for `/stats` and in the log channel
+ *    for humans — before the handler returns.
+ */
+import { cachesFor } from "./caches.ts";
+import { PERMS_MEMBER, PERMS_MUTED, type Runtime } from "./context.ts";
+import { banAdd, logEvent, warnInc, warnReset } from "./db/repo.ts";
+import { describeStrike, strikeAt } from "./ladder.ts";
+import { displayName, escapeHtml, untilDate, type TgResult } from "./telegram.ts";
+import type { ChatConfig, Strike } from "./rules.ts";
 import type { TgChat, TgMessage, TgUser } from "./types.ts";
 
 export type PunishResult = { acted: boolean; errors: string[] };
 
-/**
- * Apply the configured punishment to a message's author, then remove the
- * message.
- *
- * Order matters and so does isolation: the previous template deleted first and
- * awaited it inline, so one `deleteMessage` failure (already deleted, message
- * too old) cancelled the ban entirely. Here each step is independent and the
- * first error is surfaced instead of swallowed.
- */
-export async function punish(ctx: Ctx, msg: TgMessage, rules: ChatRules, reason: string): Promise<PunishResult> {
-  const errors: string[] = [];
-  const author = msg.from;
-  let acted = false;
-
-  if (author && rules.spamAction !== "delete") {
-    const res =
-      rules.spamAction === "ban"
-        ? await ctx.tg.call("banChatMember", { chat_id: msg.chat.id, user_id: author.id })
-        : await restrict(ctx, msg.chat.id, author.id, PERMS_MUTED, ctx.now() + rules.muteMinutes * 60);
-    if (res.ok) acted = true;
-    else errors.push(res.error);
-  }
-
-  const removed = await ctx.tg.call("deleteMessage", {
-    chat_id: msg.chat.id,
-    message_id: msg.message_id,
-  });
-  if (removed.ok) acted = true;
-  else if (removed.code !== 400) errors.push(removed.error);
-
-  if (acted) {
-    await logAction(ctx, rules, {
-      chat: msg.chat,
-      user: author,
-      action: rules.spamAction,
-      reason,
-      minutes: rules.muteMinutes,
-    });
-  }
-  return { acted, errors };
-}
-
 export async function restrict(
-  ctx: Ctx,
+  rt: Runtime,
   chatId: number,
   userId: number,
-  permissions: Record<string, boolean>,
-  until?: number,
-) {
+  minutes: number,
+  permissions: Record<string, boolean> = PERMS_MUTED,
+): Promise<TgResult<true>> {
   const body: Record<string, unknown> = {
     chat_id: chatId,
     user_id: userId,
@@ -63,93 +33,67 @@ export async function restrict(
     // "unmute" silently restores far more than intended.
     use_independent_chat_permissions: true,
   };
-  if (until && until > 0) body.until_date = until;
-  return ctx.tg.call("restrictChatMember", body);
+  const until = untilDate(rt.now(), minutes * 60);
+  if (until) body.until_date = until;
+  return rt.api.call<true>("restrictChatMember", body);
 }
 
-export async function unmute(ctx: Ctx, chatId: number, userId: number) {
-  return restrict(ctx, chatId, userId, PERMS_MEMBER);
+export async function silence(rt: Runtime, chatId: number, userId: number): Promise<TgResult<true>> {
+  return restrict(rt, chatId, userId, 0);
 }
 
-/** Ban then immediately unban: removes the member but lets them rejoin. */
-export async function kick(ctx: Ctx, chatId: number, userId: number) {
-  const banned = await ctx.tg.call("banChatMember", { chat_id: chatId, user_id: userId });
-  if (!banned.ok) return banned;
-  return ctx.tg.call("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: true });
-}
-
-export async function unban(ctx: Ctx, chatId: number, userId: number) {
-  await ctx.tg.call("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: false });
-  return unmute(ctx, chatId, userId);
-}
-
-// ---------------------------------------------------------------------------
-// Warnings
-// ---------------------------------------------------------------------------
-
-const WARN_TTL = 7 * 24 * 3600;
-
-function warnKey(chatId: number, userId: number): string {
-  return `warn:${chatId}:${userId}`;
-}
-
-export async function addWarning(ctx: Ctx, chatId: number, userId: number): Promise<number> {
-  const raw = await ctx.store.get(warnKey(chatId, userId));
-  let count = 0;
-  if (raw) {
-    try {
-      count = Number((JSON.parse(raw) as { count?: number }).count) || 0;
-    } catch {
-      count = 0;
-    }
-  }
-  count += 1;
-  await ctx.store.put(warnKey(chatId, userId), JSON.stringify({ count, at: ctx.now() }), WARN_TTL);
-  return count;
-}
-
-export async function clearWarning(ctx: Ctx, chatId: number, userId: number): Promise<number> {
-  const raw = await ctx.store.get(warnKey(chatId, userId));
-  let count = 0;
-  if (raw) {
-    try {
-      count = Number((JSON.parse(raw) as { count?: number }).count) || 0;
-    } catch {
-      count = 0;
-    }
-  }
-  if (count <= 0) {
-    await ctx.store.del(warnKey(chatId, userId));
-    return 0;
-  }
-  const next = count - 1;
-  if (next === 0) await ctx.store.del(warnKey(chatId, userId));
-  else await ctx.store.put(warnKey(chatId, userId), JSON.stringify({ count: next, at: ctx.now() }), WARN_TTL);
-  return next;
+export async function unmute(rt: Runtime, chatId: number, userId: number): Promise<TgResult<true>> {
+  return rt.api.call<true>("restrictChatMember", {
+    chat_id: chatId,
+    user_id: userId,
+    permissions: PERMS_MEMBER,
+    use_independent_chat_permissions: true,
+  });
 }
 
 /**
- * Drop the counter entirely.
+ * Publish a ban to the shared list.
  *
- * Escalation used to call `clearWarning`, which only decrements — so a member
- * banned at 3/3 came back with 2 warnings already banked against them.
+ * The local table is always written — that is what makes a second group on the
+ * same deployment protected for free. The remote federation is opt-in per chat
+ * and never blocks the ban itself.
  */
-export async function resetWarnings(ctx: Ctx, chatId: number, userId: number): Promise<void> {
-  await ctx.store.del(warnKey(chatId, userId));
+export async function recordBan(rt: Runtime, config: ChatConfig, userId: number, reason: string, source = "local"): Promise<void> {
+  await banAdd(rt.db, { userId, reason, source, at: rt.now() }).catch(() => undefined);
+  if (config.federation) await rt.screener.report(userId, reason).catch(() => false);
 }
 
-export async function warningsOf(ctx: Ctx, chatId: number, userId: number): Promise<number> {
-  const raw = await ctx.store.get(warnKey(chatId, userId));
-  if (!raw) return 0;
-  try {
-    return Number((JSON.parse(raw) as { count?: number }).count) || 0;
-  } catch {
-    return 0;
+export async function ban(rt: Runtime, chatId: number, userId: number, minutes = 0): Promise<TgResult<true>> {
+  const body: Record<string, unknown> = { chat_id: chatId, user_id: userId, revoke_messages: false };
+  const until = untilDate(rt.now(), minutes * 60);
+  if (until) body.until_date = until;
+  return rt.api.call<true>("banChatMember", body);
+}
+
+/** Ban then immediately unban: removes the member but lets them rejoin. */
+export async function kick(rt: Runtime, chatId: number, userId: number): Promise<TgResult<true>> {
+  const banned = await ban(rt, chatId, userId);
+  if (!banned.ok) return banned;
+  const res = await rt.api.call<true>("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: true });
+  return res.ok ? { ok: true, result: true } : res;
+}
+
+export async function unban(rt: Runtime, chatId: number, userId: number): Promise<TgResult<true>> {
+  const res = await rt.api.call<true>("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: false });
+  await unmute(rt, chatId, userId);
+  return res;
+}
+
+export async function deleteMessages(rt: Runtime, chatId: number, ids: number[]): Promise<TgResult<true>> {
+  if (!ids.length) return { ok: true, result: true };
+  if (ids.length === 1) {
+    return rt.api.call<true>("deleteMessage", { chat_id: chatId, message_id: ids[0] });
   }
+  return rt.api.call<true>("deleteMessages", { chat_id: chatId, message_ids: ids.slice(0, 100) });
 }
 
 // ---------------------------------------------------------------------------
-// Moderation log
+// Logging
 // ---------------------------------------------------------------------------
 
 export type LogEntry = {
@@ -159,10 +103,37 @@ export type LogEntry = {
   reason: string;
   minutes?: number;
   by?: TgUser;
+  kind?: string;
 };
 
-export async function logAction(ctx: Ctx, rules: ChatRules, entry: LogEntry): Promise<void> {
-  const target = rules.logChatId || ctx.env.LOG_CHAT_ID || "";
+export async function record(rt: Runtime, entry: { chatId: number; userId?: number; kind: string; reason?: string; minutes?: number; byId?: number }): Promise<void> {
+  try {
+    await logEvent(rt.db, {
+      chatId: entry.chatId,
+      userId: entry.userId ?? 0,
+      kind: entry.kind as never,
+      reason: entry.reason,
+      minutes: entry.minutes,
+      byId: entry.byId,
+      at: rt.now(),
+    });
+  } catch (err) {
+    // Statistics are worth less than the moderation action they describe.
+    console.log(`event log failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export async function logAction(rt: Runtime, config: ChatConfig, entry: LogEntry): Promise<void> {
+  await record(rt, {
+    chatId: entry.chat.id,
+    userId: entry.user?.id,
+    kind: entry.kind ?? "delete",
+    reason: entry.reason,
+    minutes: entry.minutes,
+    byId: entry.by?.id,
+  });
+
+  const target = config.logChatId || rt.env.LOG_CHAT_ID || "";
   if (!target) return;
   const who = entry.user ? `${escapeHtml(displayName(entry.user))} (<code>${entry.user.id}</code>)` : "未知";
   const lines = [
@@ -173,18 +144,145 @@ export async function logAction(ctx: Ctx, rules: ChatRules, entry: LogEntry): Pr
   ];
   if (entry.minutes) lines.push(`时长：${entry.minutes} 分钟`);
   if (entry.by) lines.push(`操作者：${escapeHtml(displayName(entry.by))}`);
-  const res = await ctx.tg.call("sendMessage", {
+  const res = await rt.api.call("sendMessage", {
     chat_id: target,
     text: lines.join("\n"),
     parse_mode: "HTML",
     disable_web_page_preview: true,
   });
   // A broken log target must never break the action it was reporting.
-  if (!res.ok) console.log(`log failed: ${res.error}`);
+  if (!res.ok) console.log(`log send failed: ${res.error}`);
 }
 
-export async function say(ctx: Ctx, chatId: number, text: string, replyTo?: number): Promise<void> {
+export async function say(
+  rt: Runtime,
+  chatId: number,
+  text: string,
+  options: { replyTo?: number; markup?: unknown; html?: boolean } = {},
+): Promise<TgResult<{ message_id: number }>> {
   const body: Record<string, unknown> = { chat_id: chatId, text };
-  if (replyTo) body.reply_parameters = { message_id: replyTo, allow_sending_without_reply: true };
-  await ctx.tg.call("sendMessage", body);
+  if (options.html) body.parse_mode = "HTML";
+  if (options.markup) body.reply_markup = options.markup;
+  if (options.replyTo) body.reply_parameters = { message_id: options.replyTo, allow_sending_without_reply: true };
+  return rt.api.call<{ message_id: number }>("sendMessage", body);
+}
+
+// ---------------------------------------------------------------------------
+// Automatic response
+// ---------------------------------------------------------------------------
+
+/**
+ * The single entry point for an automatic violation.
+ *
+ * Deleting the message is unconditional — a spam message that reached five
+ * hundred phones is already damage. What happens to the author is the ladder:
+ * the first rung is a short mute, the last is a ban, and the counter resets
+ * when the ladder bans. With `strikes: []` it falls back to `spamAction`.
+ */
+/**
+ * In-chat notices are rate-limited per group.
+ *
+ * A member deserves to know why their message vanished; a raid deserves silence.
+ * One notice a minute gets the first and denies the second.
+ */
+function shouldAnnounce(rt: Runtime, chatId: number, nowMs: number): boolean {
+  const noticeAt = cachesFor(rt).notice;
+  const last = noticeAt.get(chatId) ?? 0;
+  if (nowMs - last < 60_000) return false;
+  noticeAt.set(chatId, nowMs);
+  return true;
+}
+
+export async function punishAuto(
+  rt: Runtime,
+  msg: TgMessage,
+  config: ChatConfig,
+  reason: string,
+  options: { alreadyDeleted?: boolean } = {},
+): Promise<PunishResult> {
+  const errors: string[] = [];
+  const author = msg.from;
+  let acted = false;
+
+  if (!options.alreadyDeleted) {
+    const removed = await deleteMessages(rt, msg.chat.id, [msg.message_id]);
+    if (removed.ok) acted = true;
+    else if (removed.code !== 400) errors.push(removed.error);
+  } else {
+    acted = true;
+  }
+
+  if (!author) {
+    if (acted) await logAction(rt, config, { chat: msg.chat, action: "删除", reason, kind: "delete" });
+    return { acted, errors };
+  }
+
+  const count = await warnInc(rt.db, msg.chat.id, author.id, rt.now()).catch(() => 0);
+  const strike = strikeAt(count, config);
+
+  if (strike) {
+    await applyStrike(rt, msg.chat.id, author, strike, reason, count, config);
+    if (shouldAnnounce(rt, msg.chat.id, rt.now())) {
+      await say(rt, msg.chat.id, `已处理：${escapeHtml(reason)}（${describeStrike(strike)}）`, { html: true });
+    }
+    return { acted: true, errors };
+  }
+
+  // No ladder configured: apply the flat action.
+  if (config.spamAction === "ban") {
+    const res = await ban(rt, msg.chat.id, author.id);
+    if (!res.ok) errors.push(res.error);
+    else await recordBan(rt, config, author.id, reason);
+  } else if (config.spamAction === "mute") {
+    const res = await restrict(rt, msg.chat.id, author.id, config.muteMinutes);
+    if (!res.ok) errors.push(res.error);
+  }
+
+  if (shouldAnnounce(rt, msg.chat.id, rt.now())) {
+    await say(rt, msg.chat.id, `已处理：${escapeHtml(reason)}`, { html: true });
+  }
+  await logAction(rt, config, {
+    chat: msg.chat,
+    user: author,
+    action: config.spamAction === "ban" ? "自动封禁" : config.spamAction === "mute" ? `自动禁言 ${config.muteMinutes} 分钟` : "删除消息",
+    reason,
+    minutes: config.spamAction === "mute" ? config.muteMinutes : undefined,
+    kind: config.spamAction === "ban" ? "ban" : config.spamAction === "mute" ? "mute" : "delete",
+  });
+  return { acted, errors };
+}
+
+async function applyStrike(
+  rt: Runtime,
+  chatId: number,
+  author: TgUser,
+  strike: Strike,
+  reason: string,
+  count: number,
+  configForStrike: ChatConfig,
+): Promise<void> {
+  const base = { chatId, userId: author.id, reason: `${reason}（第 ${count} 次）`, byId: 0 };
+  if (strike.action === "ban") {
+    await ban(rt, chatId, author.id, strike.minutes);
+    await recordBan(rt, configForStrike, author.id, reason);
+    await warnReset(rt.db, chatId, author.id).catch(() => undefined);
+    await record(rt, { ...base, kind: "ban", minutes: strike.minutes });
+    return;
+  }
+  if (strike.action === "kick") {
+    await kick(rt, chatId, author.id);
+    await record(rt, { ...base, kind: "kick" });
+    return;
+  }
+  if (strike.action === "mute" && strike.minutes > 0) {
+    await restrict(rt, chatId, author.id, strike.minutes);
+    await record(rt, { ...base, kind: "mute", minutes: strike.minutes });
+    return;
+  }
+  await record(rt, { ...base, kind: "warn" });
+}
+
+export function strikeSummary(config: ChatConfig, count: number): string {
+  const strike = strikeAt(count, config);
+  return strike ? `第 ${count} 次：${describeStrike(strike)}` : `第 ${count} 次：只记录`;
 }

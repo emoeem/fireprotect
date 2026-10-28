@@ -1,186 +1,113 @@
-# 焰卫 · 群管理机器人（可直接运行的版本）
+# 焰卫 · Telegram 群管理机器人
 
-从这个仓库的配置生成器（`src/lib/generate-worker.ts`，把 600 行代码拼成字符串塞进输入框）派生出**真正的机器人工程**：同一套群管逻辑，写成可维护的模块，带测试、带部署配置。
-
-两种跑法共用一份核心，只换传输层：
+一个可正式上线的 Telegram 群管理 / 反垃圾机器人：同一套核心，两种跑法。
 
 | 形态 | 入口 | 场景 |
 |---|---|---|
-| Cloudflare Worker（webhook） | `src/worker.ts` | 正式上线，免费额度就够 |
-| 本机长轮询 | `src/node.ts` | 没有域名、在公司网络后面、想先在本机试 |
-
-**零运行时依赖**：`package.json` 里没有 `dependencies`。装不装 `wrangler` 只影响部署方式。
-
----
-
-## 一、5 分钟跑起来（本机长轮询，不需要域名）
+| Cloudflare Worker（webhook） | `src/worker.ts` | 正式上线；cron 负责关闭过期验证 |
+| 本机长轮询 | `src/node.ts` | 没有域名、先在本机跑 |
 
 ```bash
-# 1. 找 @BotFather 要一个 BOT_TOKEN
-# 2. 跑起来
 cd bot
-BOT_TOKEN=123456:ABC-DEF... node --experimental-strip-types src/node.ts
+BOT_TOKEN=123456:ABC-DEF... npm run dev        # 长轮询
+npm test && npm run typecheck && npm run lint  # 96 测试
 ```
 
-启动时会打印 `焰卫已上线：@your_bot`。然后：
+拉进群 → **设为管理员**（删除消息、封禁用户、置顶消息）→ @BotFather `/setprivacy` 选 **Disable**。
+不关隐私模式，机器人只能看见命令，看不见广告。
 
-1. 把机器人拉进群 → **设为管理员** → 勾选「删除消息」「封禁用户」「置顶消息」。
-2. 到 @BotFather → `/setprivacy` → 选 **Disable**。不关的话机器人收不到普通群消息，只能看到命令。
-3. 群里发 `/id` 看你自己的数字 ID；`/help` 看命令表；`/rules` 看当前规则。
+## 一、运行时依赖（都有明确用途）
 
-状态落在 `bot/.bot-data/`（每群规则、待验证名单、警告次数），一个 key 一个 JSON 文件，可直接 `ls` 检查。想换目录用 `BOT_DATA_DIR=/tmp/x`。
+| 库 | 用途 | 为什么不用手写 |
+|---|---|---|
+| `zod` | 每群配置的 schema 校验 | 配置来自群管理员的自由文本，`NaN` 一路传到 `until_date` 就是永久封禁 |
+| `drizzle-orm` | D1 / SQLite 迁移与查询 | 同一份 schema 同时跑在 Workers 和本地 `node:sqlite` |
+| `lru-cache` | 配置、权限、刷屏窗口、指纹的 TTL 缓存 | 见 `src/caches.ts`：缓存按 runtime 分实例 |
+| `he` | HTML 实体转义 | 用户昵称进 `parse_mode: HTML` 时是注入面 |
+| `tldts` | 域名后缀解析 | 判断高风险 TLD 需要公共后缀表，正则做不对 |
 
-> 长轮询会先调用 `deleteWebhook`。如果同一个机器人另有一个 Worker 在跑，两边会互相抢更新（`getUpdates` 报 409），只能选一种。
+`grammy` 评估后没有引入：现有传输层只有 130 行、已被 96 个测试覆盖，迁移要重写命令层与全部测试，成本不可控（见 `docs/research/competitors.md`）。
 
-## 二、部署到 Cloudflare Worker
+## 二、存储分工
+
+热状态进 KV（每群配置、待验证、进群时间），可查询的记录进 D1（处置事件、警告、说明、自动回复、共享黑名单）。
+
+这样分是为了**不在每条消息上写 KV**：免费额度 1,000 写/天，一次写入就是一次配额。刷屏窗口、重复内容指纹因此放在 isolate 内存里——它们是近似判断，值得用精度换成本。
+
+首次启动自动建表（`src/db/migrate.ts`），不需要手工 `d1 migrations apply`。
+
+## 三、命令
+
+任何人：`/id` `/rules` `/notes` `/get <名字>` `/help`
+
+管理员（回复对方后发；括号里是需要的群权限）：
+
+| 命令 | 作用 | 权限 |
+|---|---|---|
+| `/ban [分钟]` `/mute [分钟]` `/kick` `/unban` | 处置 | 封禁用户 |
+| `/warn` `/unwarn` `/verify` `/trust` | 警告、放行、信任 | 封禁用户 |
+| `/del` `/purge [数量]` | 删消息 | 删除消息 |
+| `/pin` `/unpin` | 置顶 | 置顶消息 |
+| `/lock` `/unlock` | 不带参数＝全群禁言/解除 | 封禁用户 |
+| `/lock links photos …` / `/lock all` | 按消息类型拦截 | 封禁用户 |
+| `/set 字段 值` | 改规则，`/set strikes off` 关阶梯 | 修改群信息 |
+| `/captcha on\|off\|button\|math\|question` | 验证方式 | 修改群信息 |
+| `/keywords add 词1,词2` `/keywords del 词` | 关键词 | 修改群信息 |
+| `/nightmode on\|off [23:00-07:00]` | 夜间只允许管理员发言 | 修改群信息 |
+| `/logs 频道ID\|off` | 处置记录发到哪 | 修改群信息 |
+| `/save 名字 内容` `/delnote 名字` | 群内说明 | 修改群信息 |
+| `/filter add exact\|prefix\|regex 触发词 => 回复` | 自动回复 | 修改群信息 |
+| `/filters` `/delfilter ID` | 管理自动回复 | 修改群信息 |
+| `/export` `/import <JSON>` | 规则模板复制到别的群 | 修改群信息 |
+| `/stats [天数]` `/config` | 统计与当前配置 | 管理员 |
+
+## 四、防护能力
+
+- **新人验证三档**：`button`（点按钮，默认）、`math`（四个选项，防脚本）、`question`（自由文本答案）。
+  button/math 会把新人静音，因为被静音的人无法打字；question 模式反过来——不静音，答错的消息直接删掉。
+- **阶梯制裁**：默认 1 次禁言 1h、2 次禁言 24h、3 次封禁，`/set strikes off` 回到单次处置。计数在封禁时清零。
+- **内容锁**：链接 / 图片 / 视频 / 贴纸 / 动图 / 文件 / 投票 / 语音 / 转发 / 邀请 / 提及 / 频道身份 / 机器人消息。
+- **新人窗口**（默认 24h）：新号发链接和提及直接删；管理员 `/unban` 过的人自动免检。
+- **炸群防护**：`joinRateMax` 秒内进群人数超阈值 → 提醒或直接锁群。
+- **外部名单**：CAS（需要 Combot API key）、自建联邦、本地共享黑名单。三者都是 **fail-open**：超时 2s、失败缓存 5 分钟、401/403 不重试，宁可漏杀不误杀。
+- **本地启发式**：邀请链接、高风险 TLD、冒充官方+链接、不可见字符、拉丁/西里尔混排、多人同文。外部服务全挂时它还在工作。
+- **幂等**：`update_id` 去重 + 同群串行，重复投递不会二次处罚；按钮回调带 HMAC，不能替别人过验证。
+
+## 五、部署
 
 ```bash
 cd bot
-npx wrangler kv namespace create STORE     # 输出里的 id 填进 wrangler.toml，并去掉那三行注释
 npx wrangler secret put BOT_TOKEN
-npx wrangler secret put WEBHOOK_SECRET     # 可选但强烈建议
+npx wrangler secret put WEBHOOK_SECRET    # /install 的安装密钥，必填
+npx wrangler secret put CAS_KEY           # 可选
 npx wrangler deploy
 ```
 
-部署完打开 `https://<worker 域名>/install`，提交表单完成接入（会 `setWebhook` + 写命令菜单）。
+`wrangler.toml` 里已经绑好 KV、D1 和每分钟一次的 cron。部署后打开 `https://<worker 域名>/install`，填 `WEBHOOK_SECRET` 完成 `setWebhook`。
 
-- 打开 `/install` 这个 **GET 只显示表单**，真正改 webhook 的是 POST。旧模板用 GET 完成变更，一个链接预览就可能把 webhook 指到别处。
-- 不接 KV 也能跑，但会退化成 per-isolate 内存：重启丢规则、丢待验证名单。生产请接。
+- `/health` 返回 bot / db 绑定状态；D1 没绑会直接 503 说明原因。
+- `npm run live` 用真 token 跑一遍 Bot API 自检（含隐私模式、群权限、发一条再删掉）。
+- webhook 路由校验 `X-Telegram-Bot-Api-Secret-Token`；没配 `WEBHOOK_SECRET` 时用 BOT_TOKEN 派生，不存在「没配就没校验」。
 
-## 三、群里怎么用
+长期跑长轮询：`BOT_TOKEN=... npm run dev`，状态在 `bot.db` + `.bot-store/`。
 
-任何人：`/id`、`/rules`、`/help`
-
-管理员（回复对方消息后）：
-
-| 命令 | 作用 |
-|---|---|
-| `/ban [分钟]` | 封禁；带分钟数到期自动解封 |
-| `/mute [分钟]` | 禁言，默认取 `muteMinutes` |
-| `/kick` | 踢出，对方还能再进来 |
-| `/unban` | 解封并恢复发言 |
-| `/warn` | 删掉被回复的消息 + 记一次警告，满 `warnLimit` 次自动封禁 |
-| `/unwarn` | 撤销一次警告 |
-| `/del` | 删除被回复的消息 |
-| `/purge [数量]` | 从被回复那条删到这里，最多 100 条 |
-| `/pin` / `/unpin` | 置顶 / 取消置顶 |
-| `/lock` / `/unlock` | 全群禁言 / 解除（管理员不受影响） |
-
-也可以不回复，写成 `/ban 123456789`。
-
-改规则（每群各自保存，不需要重新部署）：
+## 六、目录
 
 ```
-/set captcha off          /set filterLinks on
-/set warnLimit 5          /set maxLength 0        # 0 = 关掉超长拦截
-/set spamAction ban       /set muteMinutes 60
-/set captchaPrompt {name}，点按钮进群
-/captcha on|off           /keywords add 引流,代开
-/keywords del 引流        /keywords list
-/logs -1001234567890      /logs off               # 审核记录发到频道
-/config                                          # 看全部字段当前值
+src/rules.ts        配置 schema（zod）/ 默认值 / 描述
+src/filters.ts      内容判定（锁、新人、关键词、长度）
+src/heuristics.ts   本地评分与重复内容
+src/captcha.ts      验证挑战与 HMAC 回调
+src/ladder.ts       阶梯制裁
+src/nightmode.ts    夜间窗口
+src/replies.ts      自动回复匹配
+src/moderation.ts   所有改动群状态的动作 + 事件落库
+src/bot.ts          update 分发（去重 + 同群串行）
+src/handlers/       message / commands / join / verify / callback
+src/db/             schema、迁移、查询、D1 与 node:sqlite 两个驱动
+src/external/       第三方名单（唯一出网点，3 条失败策略在这里）
+src/worker.ts       Worker 入口（webhook、/install、/health、cron）
+src/node.ts         长轮询入口
 ```
 
-**配置项全表**
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `captcha` | `true` | 新人进群先禁言，点按钮才放行 |
-| `captchaPrompt` | `{name}，先点下面的按钮。通过之前不能发言。` | 支持 `{name}` `{chat}` `{username}` |
-| `captchaTimeout` | `900` | 秒；超时移出群（30–86400） |
-| `welcome` / `welcomeText` | `true` / 见源码 | 验证通过或直接进群时发送 |
-| `deleteJoinMessages` | `true` | 删「某某加入了群组」 |
-| `keywords` | 加微信/代理/博彩/日赚/兼职刷单 | 不区分大小写，最多 200 条 |
-| `filterLinks` | `true` | 含链接即处理（裸域名也认） |
-| `filterForwards` | `false` | 转发消息 |
-| `filterChannels` | `true` | 以频道身份发言 |
-| `maxLength` | `1200` | 0 = 关闭 |
-| `floodLimit` / `floodWindow` | `0` / `10` | 刷屏：窗口内超过 N 条则处理，0 = 关闭 |
-| `spamAction` | `delete` | `delete` / `mute` / `ban` |
-| `muteMinutes` | `30` | |
-| `warnLimit` | `3` | 0 = 关闭自动封禁 |
-| `logChatId` | `""` | 审核记录目标，空则用环境变量 `LOG_CHAT_ID` |
-
-## 四、结构
-
-```
-bot/
-├── src/
-│   ├── types.ts        Telegram 子集类型 + Store/Env 接口（手写，不引 workers-types）
-│   ├── rules.ts        每群规则的默认值、合并与边界钳制
-│   ├── store.ts        存储抽象 + memory（测试/兜底）+ KV（生产）+ 分页 list
-│   ├── store-file.ts   磁盘存储（只给本机长轮询用）
-│   ├── telegram.ts     Bot API 客户端：超时、429/网络错误各重试一次、HTML 转义
-│   ├── context.ts      Ctx 组装、规则读写、管理员解析（静态名单 ∪ 群管理员，带缓存）
-│   ├── moderation.ts   处置/禁言/踢人/解封、警告计数、审核日志
-│   ├── filters.ts      链接/关键词/转发/频道/超长/刷屏判定
-│   ├── captcha.ts      HMAC 签名按钮、放行、超时清扫
-│   ├── commands.ts     命令路由与参数解析
-│   ├── router.ts       update 分发：callback → 成员变动 → 命令 → 内容过滤
-│   ├── install.ts      /install 页面与 setWebhook
-│   ├── worker.ts       Cloudflare 入口（makeWorker 可注入假 Telegram）
-│   └── node.ts         长轮询入口
-└── test/               76 个用例，含假 Bot API（记录每一次调用）
-```
-
-一次更新的流向：
-
-```
-Telegram → worker.fetch / getUpdates
-        → 校验 secret_token（恒定时间比较）
-        → handleUpdate
-             ├ callback_query → 验证签名/归属/时效 → 放行 + 删提示 + 欢迎
-             ├ my_chat_member → 被拉进群时的安装指引
-             └ message
-                  ├ 新成员 → 禁言(带 until_date) + 按钮 + 删服务消息
-                  ├ 成员离开 → 删服务消息
-                  ├ 命令   → 解析目标 → 校验身份 → 调 Bot API → 回报真实结果
-                  └ 其它   → 内容过滤（频道/转发/关键词/链接/超长）→ 刷屏 → 处置
-```
-
-## 五、测试
-
-```bash
-cd bot
-node --experimental-strip-types --test test/*.test.ts   # 76 passed
-../node_modules/.bin/tsc -p tsconfig.json              # 0 errors
-```
-
-测试的核心是 `test/harness.ts` 里的假 Bot API：它记录机器人**实际发出的每一次调用**，所以「处罚了但没有真的 ban」这种失败能被抓住，而不是只断言「数据里有」。
-
-覆盖的关键行为：
-
-- 未配置 `WEBHOOK_SECRET` 时，伪造的 webhook POST 仍然 401（旧模板这时是完全不校验的）
-- 频道身份发言（无 `from`）仍被拦截——旧模板的过滤顺序让这条规则变成死代码
-- `/mute 10` 被拒绝，而不是去禁言 id 恰好为 10 的陌生人
-- 按钮发不出去时**把成员资格还回去**，不制造「永久禁言」
-- 警告满额 → 封禁 + 计数归零（不是减一）
-- Telegram 返回失败时回复「没成功：<原因>」，不假装成功
-
-## 六、安全上的取舍
-
-| 决定 | 原因 |
-|---|---|
-| webhook 永远校验，密钥回退到 `BOT_TOKEN` | 空密钥不能等于「不校验」；`BOT_TOKEN` 只有 Telegram 和部署方知道 |
-| 捕获按钮用 HMAC 签名 + 过期时间 + 归属校验 | 少任何一条，别人可以替你点掉验证 |
-| 禁言带 `until_date` | Worker 没有可靠的定时器；bot 死了也不能让人永久闭嘴 |
-| 放行只给「发言」权限 | `can_invite_users: true` 会绕开群自己的邀请策略 |
-| 处置与删除互相独立 | 旧模板删除失败会连带取消封禁 |
-| 审核日志失败不影响处置 | 日志是旁路，不是前置条件 |
-| 所有用户文本走 `escapeHtml` | 显示名可以是 `<b>x</b>`，在管理员的 HTML 消息里就是标记 |
-
-## 七、已知限制
-
-- **超时清算是惰性的**：Worker 不能定时，只有群里来消息时才会顺便扫一次（每群 30 秒节流）。没有流量的群也不需要清算。
-- **没有支付/订阅、没有 CAS 黑名单库**：这是一个纯本地规则机器人，不依赖任何第三方服务。
-- **`/purge` 依赖消息 id 连续**，在超级群里通常成立；任一条删除失败整批可能被拒。
-- **KV 写额度**：每条待验证成员一次写、每次刷屏判定一次写。`floodLimit` 保持默认 0 就不产生这笔开销。
-- **Cloudflare 免费版 50 subrequest/请求**：批量入群（一次 `new_chat_members` 很多人）时可能触顶，`/lock`、`/purge` 也一样。
-- 本机长轮询**没有**做多进程主备；同一个 token 只能有一个消费者。
-- `wrangler deploy` 在本机没有执行（环境离线，未安装 wrangler）。worker 入口的依赖图已确认不含 `node:` 内置模块（只有 `store-file.ts` 用，且只被 `node.ts` 引用），但**部署这一步需要你在有网络的环境跑一次确认**。
-
-## 八、和旧「生成器」的关系
-
-`src/lib/generate-worker.ts` 仍然在仓库里，网页还能生成单文件 Worker——那份适合「粘贴一次就不管」的场景。这里这份适合要长期维护、要多群不同规则、要能在本机调试的场景。
-
-两者行为对齐的地方：同样的关键词默认值、同样的 `/ban /mute /kick /unban /warn /del /pin`、同样的处置语义（`delete`/`mute`/`ban`）。这份多出来的：每群独立规则、警告升级、刷屏控制、群管理员自动识别、审核日志、`/purge /lock /unlock /set /keywords /config`、超时自动移出。
+`docs/research/competitors.md` 是对标调研（Miss Rose、Shieldy、tg-spam、Combot）与外部 API 实测结果。

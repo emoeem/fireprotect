@@ -1,192 +1,168 @@
-import type { Ctx } from "./context.ts";
-import { PERMS_MEMBER, PERMS_MUTED } from "./context.ts";
-import { kick, logAction, restrict, say } from "./moderation.ts";
-import { fillTemplate, type ChatRules } from "./rules.ts";
-import type { TgCallbackQuery, TgMessage, TgUser } from "./types.ts";
+/**
+ * Newcomer verification.
+ *
+ * Three tiers, because "click the button" only stops someone who cannot read
+ * the button:
+ *  - button:   one tap. Cheap, resists humans-who-are-bots, not scripts.
+ *  - math:     answer a sum. Stops the copy-paste scripts that click anything.
+ *  - question: answer the group's own question. Stops a script that does not
+ *              know the group, which is what raid tools are.
+ *
+ * The button carries an HMAC over (chat, user, nonce), so a crafted callback
+ * cannot verify somebody else. The challenge itself lives in the store with a
+ * TTL — a callback for an expired window fails even if the signature is valid.
+ */
+import type { CaptchaMode } from "./rules.ts";
 
-const encoder = new TextEncoder();
+export type Challenge = {
+  mode: CaptchaMode;
+  nonce: string;
+  /** Unix ms. */
+  expiresAt: number;
+  question?: string;
+  /** Accepted answers, already lowercased and trimmed. */
+  answers?: string[];
+  /** `math` mode only: the buttons offered, in order. */
+  options?: number[];
+  attempts: number;
+};
 
-function secretOf(env: { WEBHOOK_SECRET?: string; BOT_TOKEN?: string }): string {
-  // Never a hard-coded constant: anyone could recompute the signature offline.
-  // The bot token is mandatory and known only to Telegram and the deployment.
-  return String(env.WEBHOOK_SECRET || env.BOT_TOKEN || "");
+export type VerifyOutcome =
+  | { ok: true; nonce: string; choice?: number }
+  | { ok: false; reason: string };
+
+const enc = new TextEncoder();
+
+function b64url(bytes: Uint8Array): string {
+  let raw = "";
+  for (const byte of bytes) raw += String.fromCharCode(byte);
+  return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** Truncated HMAC-SHA256, hex. `callback_data` has a 64-byte budget. */
-export async function signature(secret: string, payload: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
+export function newNonce(bytes = 9): string {
+  const buf = new Uint8Array(bytes);
+  crypto.getRandomValues(buf);
+  return b64url(buf);
+}
+
+async function hmac(secret: string, message: string): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
     "sign",
   ]);
-  const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  const bytes = new Uint8Array(mac).slice(0, 8);
-  let hex = "";
-  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
-  return hex;
-}
-
-export function pendingKey(chatId: number, userId: number): string {
-  return `captcha:${chatId}:${userId}`;
-}
-
-export type Pending = { exp: number; promptId: number };
-
-export async function pendingOf(ctx: Ctx, chatId: number, userId: number): Promise<Pending | null> {
-  const raw = await ctx.store.get(pendingKey(chatId, userId));
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as Partial<Pending>;
-    if (typeof parsed.exp !== "number") return null;
-    return { exp: parsed.exp, promptId: Number(parsed.promptId) || 0 };
-  } catch {
-    return null;
-  }
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
+  return new Uint8Array(sig);
 }
 
 /**
- * Mute a new member and send the button.
- *
- * The restriction carries `until_date = expiry`, so even if this Worker dies
- * before the sweep runs, Telegram lifts the mute on its own: a broken bot must
- * not leave people silenced forever.
+ * `v1.<nonce>.<mac>` for the button, `v2.<nonce>.<choice>.<mac>` for a math
+ * option — both under Telegram's 64-byte `callback_data` limit. The choice is
+ * inside the MAC, so a member cannot tap "4" and claim they tapped "9".
  */
-export async function challenge(ctx: Ctx, msg: TgMessage, user: TgUser, rules: ChatRules): Promise<void> {
-  const exp = Math.floor(ctx.now() / 1000) + rules.captchaTimeout;
-  await restrict(ctx, msg.chat.id, user.id, PERMS_MUTED, exp);
-
-  const sig = await signature(secretOf(ctx.env), `${msg.chat.id}:${user.id}:${exp}`);
-  const sent = await ctx.tg.call<{ message_id: number }>("sendMessage", {
-    chat_id: msg.chat.id,
-    text: fillTemplate(rules.captchaPrompt, user, msg.chat),
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: "我是本人，放行",
-            callback_data: `v:${user.id}:${exp}:${sig}`,
-          },
-        ],
-      ],
-    },
-    reply_parameters: { message_id: msg.message_id, allow_sending_without_reply: true },
-  });
-
-  if (!sent.ok) {
-    // No button means no way to verify — that is a permanent mute by accident.
-    await restrict(ctx, msg.chat.id, user.id, PERMS_MEMBER);
-    await logAction(ctx, rules, {
-      chat: msg.chat,
-      user,
-      action: "验证按钮发不出去",
-      reason: sent.error,
-    });
-    return;
-  }
-
-  await ctx.store.put(
-    pendingKey(msg.chat.id, user.id),
-    JSON.stringify({ exp, promptId: sent.result.message_id }),
-    rules.captchaTimeout + 300,
-  );
+export async function signCallback(
+  secret: string,
+  chatId: number,
+  userId: number,
+  nonce: string,
+  choice?: number,
+): Promise<string> {
+  const binding = `${chatId}:${userId}:${nonce}${choice === undefined ? "" : `:${choice}`}`;
+  const mac = b64url((await hmac(secret, binding)).slice(0, 16));
+  return choice === undefined ? `v1.${nonce}.${mac}` : `v2.${nonce}.${choice}.${mac}`;
 }
 
-export async function handleCaptchaCallback(ctx: Ctx, query: TgCallbackQuery, rules: ChatRules): Promise<boolean> {
-  const data = String(query.data ?? "");
-  if (!data.startsWith("v:")) return false;
-
-  const parts = data.split(":");
-  const chat = query.message?.chat;
-  if (!chat || parts.length !== 4) {
-    await ctx.tg.call("answerCallbackQuery", { callback_query_id: query.id, text: "验证数据无效", show_alert: true });
-    return true;
+export async function verifyCallback(
+  secret: string,
+  chatId: number,
+  userId: number,
+  data: string | undefined,
+): Promise<VerifyOutcome> {
+  const parts = String(data ?? "").split(".");
+  if (parts.length === 3 && parts[0] === "v1") {
+    const [, nonce, mac] = parts as [string, string, string];
+    const expected = b64url((await hmac(secret, `${chatId}:${userId}:${nonce}`)).slice(0, 16));
+    if (mac !== expected) return { ok: false, reason: "回调签名不对" };
+    return { ok: true, nonce };
   }
-
-  const [, rawId, rawExp, sig] = parts;
-  if (String(query.from.id) !== rawId) {
-    await ctx.tg.call("answerCallbackQuery", {
-      callback_query_id: query.id,
-      text: "这不是你的验证按钮",
-      show_alert: true,
-    });
-    return true;
+  if (parts.length === 4 && parts[0] === "v2") {
+    const [, nonce, rawChoice, mac] = parts as [string, string, string, string];
+    const choice = Number(rawChoice);
+    if (!Number.isFinite(choice)) return { ok: false, reason: "回调格式不对" };
+    const expected = b64url((await hmac(secret, `${chatId}:${userId}:${nonce}:${choice}`)).slice(0, 16));
+    if (mac !== expected) return { ok: false, reason: "回调签名不对" };
+    return { ok: true, nonce, choice };
   }
-
-  const exp = Number(rawExp);
-  if (!Number.isFinite(exp) || exp * 1000 < ctx.now()) {
-    await ctx.tg.call("answerCallbackQuery", {
-      callback_query_id: query.id,
-      text: "按钮已过期，请让管理员重新放行或重新进群",
-      show_alert: true,
-    });
-    return true;
-  }
-
-  const expect = await signature(secretOf(ctx.env), `${chat.id}:${rawId}:${rawExp}`);
-  if (expect !== sig) {
-    await ctx.tg.call("answerCallbackQuery", { callback_query_id: query.id, text: "签名不符", show_alert: true });
-    return true;
-  }
-
-  await restrict(ctx, chat.id, query.from.id, PERMS_MEMBER);
-  await ctx.store.del(pendingKey(chat.id, query.from.id));
-  await ctx.tg.call("answerCallbackQuery", { callback_query_id: query.id, text: "通过了，可以发言" });
-
-  if (query.message) {
-    await ctx.tg.call("deleteMessage", { chat_id: chat.id, message_id: query.message.message_id });
-  }
-  if (rules.welcome) {
-    await say(ctx, chat.id, fillTemplate(rules.welcomeText, query.from, chat));
-  }
-  return true;
+  return { ok: false, reason: "回调格式不对" };
 }
 
 /**
- * Remove members who never pressed the button.
+ * `7 + 5 = ?` with four buttons.
  *
- * Workers have no durable timers, so the sweep is lazy: any update in the chat
- * can trigger it, throttled to once every 30 seconds per chat. With no traffic
- * nobody is being challenged either, so the delay is harmless.
+ * The answer options exist because a muted member cannot type: in math mode the
+ * bot stays silent-safe (muted) and the answer is a tap. Decoys are distinct
+ * from the answer and from each other.
  */
-export async function sweep(ctx: Ctx, chatId: number, rules: ChatRules): Promise<number> {
-  const marker = `sweepmark:${chatId}`;
-  if (await ctx.store.get(marker)) return 0;
-  await ctx.store.put(marker, "1", 30);
+export function mathChallenge(random: () => number = Math.random): {
+  question: string;
+  answers: string[];
+  options: number[];
+} {
+  const a = 2 + Math.floor(random() * 8);
+  const b = 2 + Math.floor(random() * 8);
+  const plus = random() < 0.5;
+  const [hi, lo] = a >= b ? [a, b] : [b, a];
+  const answer = plus ? a + b : hi - lo;
+  const question = plus ? `${a} + ${b} = ?` : `${hi} - ${lo} = ?`;
 
-  const keys = await ctx.store.keys(`captcha:${chatId}:`);
-  let removed = 0;
-  const nowSeconds = Math.floor(ctx.now() / 1000);
-  for (const key of keys) {
-    const pending = await ctx.store.get(key);
-    if (!pending) continue;
-    let entry: Pending;
-    try {
-      entry = JSON.parse(pending) as Pending;
-    } catch {
-      await ctx.store.del(key);
-      continue;
-    }
-    if (!entry || typeof entry.exp !== "number") {
-      await ctx.store.del(key);
-      continue;
-    }
-    if (entry.exp > nowSeconds) continue;
-
-    const userId = Number(key.split(":")[2]);
-    if (!Number.isFinite(userId) || userId <= 0) {
-      await ctx.store.del(key);
-      continue;
-    }
-    await kick(ctx, chatId, userId);
-    if (entry.promptId) {
-      await ctx.tg.call("deleteMessage", { chat_id: chatId, message_id: entry.promptId });
-    }
-    await ctx.store.del(key);
-    removed += 1;
-    await logAction(ctx, rules, {
-      chat: { id: chatId, type: "supergroup" },
-      user: { id: userId, first_name: "未验证成员" },
-      action: "验证超时移出",
-      reason: `${rules.captchaTimeout} 秒内未点击按钮`,
-    });
+  const options = new Set<number>([answer]);
+  while (options.size < 4) {
+    const delta = 1 + Math.floor(random() * 4);
+    const candidate = answer + (random() < 0.5 ? -delta : delta);
+    if (candidate >= 0 && candidate !== answer) options.add(candidate);
   }
-  return removed;
+  const shuffled = [...options];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j] as number, shuffled[i] as number];
+  }
+  return { question, answers: [String(answer)], options: shuffled };
 }
+
+export function normalizeAnswer(text: string): string {
+  return text
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}]+/gu, "")
+    .slice(0, 80);
+}
+
+export function matchesAnswer(challenge: Pick<Challenge, "answers">, text: string): boolean {
+  const value = normalizeAnswer(text);
+  if (!value) return false;
+  return (challenge.answers ?? []).some((answer) => normalizeAnswer(answer) === value);
+}
+
+export function challengeFor(
+  mode: CaptchaMode,
+  options: { answers: string[]; question: string; timeoutSeconds: number; nowMs: number; random?: () => number },
+): Challenge {
+  const base: Challenge = {
+    mode,
+    nonce: newNonce(),
+    expiresAt: options.nowMs + options.timeoutSeconds * 1000,
+    attempts: 0,
+  };
+  if (mode === "button") return base;
+  if (mode === "math") {
+    const math = mathChallenge(options.random);
+    return { ...base, question: math.question, answers: math.answers, options: math.options };
+  }
+  return {
+    ...base,
+    question: options.question,
+    answers: options.answers.length ? options.answers : ["我同意群规"],
+  };
+}
+
+export const VERIFY_KEY = (chatId: number, userId: number) => `verify:${chatId}:${userId}`;
+export const TRUST_KEY = (chatId: number, userId: number) => `trust:${chatId}:${userId}`;
+export const ATTEMPT_KEY = (userId: number) => `verify-attempts:${userId}`;

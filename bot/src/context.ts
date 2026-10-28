@@ -1,90 +1,205 @@
-import { DEFAULT_RULES, mergeRules, type ChatRules } from "./rules.ts";
+/**
+ * Per-update runtime: everything a handler needs, assembled once.
+ *
+ * Two caches are in-memory on purpose. Config is read from KV once a minute per
+ * isolate, and the flood window never touches KV at all: Cloudflare's free tier
+ * allows 1,000 KV writes per day, and one write per message would exhaust it
+ * before lunch while also adding latency to every message. The trade is that
+ * both are per-isolate, which is fine for flood shaping (approximate by nature)
+ * and acceptable for config (60 s of staleness after an admin changes a rule).
+ */
+import { LRUCache } from "lru-cache";
+import { type ChatConfig, DEFAULT_CONFIG, applyPatch, normalizeLegacy, patchError } from "./rules.ts";
 import { memoryStore } from "./store.ts";
 import { Telegram } from "./telegram.ts";
+import { Screener } from "./external/screen.ts";
+import { healthMark } from "./db/repo.ts";
+import { migrate } from "./db/migrate.ts";
+import { bannedUsers } from "./db/schema.ts";
+import { eq } from "drizzle-orm";
+import type { Db } from "./db/repo.ts";
+import type { SqliteHandle } from "./db/connect.ts";
 import type { Env, Store, TgChatPermissions, TgUser } from "./types.ts";
 
-/** Everything a handler needs, assembled once per update. */
-export type Ctx = {
+const CONFIG_TTL_MS = 60_000;
+const ADMIN_TTL_MS = 10 * 60_000;
+const MEMBER_RIGHT_TTL_MS = 5 * 60_000;
+
+export type Right =
+  | "can_delete_messages"
+  | "can_restrict_members"
+  | "can_pin_messages"
+  | "can_change_info"
+  | "can_invite_users"
+  | "can_promote_members";
+
+export type Runtime = {
   env: Env;
-  tg: Telegram;
+  api: Telegram;
   store: Store;
-  admins: AdminResolver;
+  /** Durable records (drizzle). */
+  db: Db;
+  sql: SqliteHandle;
+  admin: AdminResolver;
+  screener: Screener;
   now: () => number;
+  /** Minutes east of UTC used by night mode. */
+  tzOffset: number;
+  configFor: (chatId: number) => Promise<ChatConfig>;
+  saveConfig: (chatId: number, patch: Record<string, unknown>) => Promise<{ config: ChatConfig; error: string }>;
+  invalidate: (chatId: number) => void;
+  /** Serialises handlers for one chat so two events cannot punish twice. */
+  withChatLock: <T>(chatId: number, fn: () => Promise<T>) => Promise<T>;
 };
 
-export type CtxDeps = {
+export type RuntimeDeps = {
   store?: Store;
-  tg?: Telegram;
+  api?: Telegram;
+  sqlite?: SqliteHandle;
   now?: () => number;
+  fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
 };
 
-let fallbackStore: Store | null = null;
+/** Memoised per isolate so the Worker does not re-check the schema every update. */
+const migrated = new WeakMap<SqliteHandle, Promise<void>>();
 
-export function createContext(env: Env, deps: CtxDeps = {}): Ctx {
-  const tg = deps.tg ?? new Telegram(env.BOT_TOKEN ?? "");
-  // A deployment whose KV namespace is not attached yet still has to answer:
-  // one shared in-memory store keeps it working (per isolate) instead of
-  // throwing on the first message.
-  if (!deps.store && !fallbackStore) fallbackStore = memoryStore();
-  const store = deps.store ?? (fallbackStore as Store);
+export function createRuntime(env: Env, deps: RuntimeDeps & { sqlite: SqliteHandle }): Runtime {
   const now = deps.now ?? (() => Date.now());
-  return {
+  const api = deps.api ?? new Telegram(env.BOT_TOKEN ?? "");
+  const store = deps.store ?? memoryStore();
+  const sql = deps.sqlite;
+  const db = sql.db;
+
+  const timezone = Number(env.TZ_OFFSET ?? 480);
+  const tzOffset = Number.isFinite(timezone) ? timezone : 480;
+
+  const configs = new LRUCache<number, ChatConfig>({ max: 5_000, ttl: CONFIG_TTL_MS });
+  const admin = new AdminResolver(env, api, now);
+
+  const screener = new Screener({
+    fetchImpl: deps.fetchImpl,
+    local: async (userId) => {
+      const rows = (await db
+        .select({ reason: bannedUsers.reason, source: bannedUsers.source })
+        .from(bannedUsers)
+        .where(eq(bannedUsers.userId, userId))
+        .limit(1)) as { reason: string; source: string }[];
+      const hit = rows[0];
+      return hit ? { reason: hit.reason, source: hit.source } : null;
+    },
+    casKey: env.CAS_KEY,
+    federationUrl: env.FEDERATION_URL,
+    federationToken: env.FEDERATION_TOKEN,
+    onHealth: (name, ok, error) => healthMark(db, name, ok, error, now()),
+  });
+
+  const locks = new Map<number, Promise<unknown>>();
+
+  const runtime: Runtime = {
     env,
-    tg,
+    api,
     store,
+    db,
+    sql,
+    admin,
+    screener,
     now,
-    admins: new AdminResolver(env, tg, store, now),
+    tzOffset,
+
+    async configFor(chatId) {
+      const cached = configs.get(chatId);
+      if (cached) return cached;
+      const raw = await store.get(`rules:${chatId}`);
+      let config = DEFAULT_CONFIG;
+      if (raw) {
+        try {
+          config = applyPatch(DEFAULT_CONFIG, normalizeLegacy(JSON.parse(raw)));
+        } catch {
+          // A corrupt row must not lock the group out of moderation.
+          config = DEFAULT_CONFIG;
+        }
+      }
+      if (!config.logChatId && env.LOG_CHAT_ID) config = { ...config, logChatId: env.LOG_CHAT_ID };
+      configs.set(chatId, config);
+      return config;
+    },
+
+    async saveConfig(chatId, patch) {
+      const error = patchError(patch);
+      if (error) return { config: await runtime.configFor(chatId), error };
+      const current = await runtime.configFor(chatId);
+      const next = applyPatch(current, patch);
+      await store.put(`rules:${chatId}`, JSON.stringify(next));
+      configs.set(chatId, next);
+      return { config: next, error: "" };
+    },
+
+    invalidate(chatId) {
+      configs.delete(chatId);
+    },
+
+    async withChatLock<T>(chatId: number, fn: () => Promise<T>): Promise<T> {
+      const previous = locks.get(chatId) ?? Promise.resolve();
+      const run = previous.then(fn, fn);
+      // Keep the chain alive but never let a rejection poison the next update.
+      locks.set(
+        chatId,
+        run.catch(() => undefined),
+      );
+      try {
+        return await run;
+      } finally {
+        if (locks.get(chatId) === run) locks.delete(chatId);
+      }
+    },
   };
-}
 
-/** Rules for one chat: shipped defaults, overridden by whatever the chat saved. */
-export async function rulesFor(ctx: Ctx, chatId: number): Promise<ChatRules> {
-  const base: ChatRules = { ...DEFAULT_RULES, logChatId: ctx.env.LOG_CHAT_ID ?? "" };
-  const raw = await ctx.store.get(`rules:${chatId}`);
-  if (!raw) return base;
-  try {
-    return mergeRules(base, JSON.parse(raw) as Record<string, unknown>);
-  } catch {
-    // A corrupt row must not lock the group out of moderation.
-    return base;
+  // Kick off the schema check without blocking the first update; the promise is
+  // shared by every later call in this isolate.
+  if (!migrated.has(sql)) {
+    migrated.set(
+      sql,
+      migrate(sql)
+        .then(() => undefined)
+        .catch((err) => {
+          console.log(`migrate failed: ${err instanceof Error ? err.message : String(err)}`);
+        }),
+    );
   }
+
+  return runtime;
 }
 
-export async function saveRules(
-  ctx: Ctx,
-  chatId: number,
-  patch: Record<string, unknown>,
-): Promise<ChatRules> {
-  const next = mergeRules(await rulesFor(ctx, chatId), patch);
-  await ctx.store.put(`rules:${chatId}`, JSON.stringify(next));
-  return next;
+/** Awaited by the entry points so a fresh database exists before traffic. */
+export async function ensureSchema(sql: SqliteHandle): Promise<void> {
+  await migrate(sql);
 }
 
-const ADMIN_CACHE_TTL = 600;
-const ADMIN_CACHE_MISS_TTL = 60;
+// ---------------------------------------------------------------------------
+// Admin resolution
+// ---------------------------------------------------------------------------
+
+type MemberRights = { status: string; rights: Record<string, boolean>; at: number };
 
 /**
- * Who counts as an admin.
+ * Who counts as an admin, and what they may do.
  *
  * Two sources, both needed: `ADMIN_IDS` is the operator's own allow-list and
- * works before the bot has talked to the group; the live admin list is the
- * truth after someone is promoted or demoted in Telegram itself. If the live
- * lookup fails we fall back to the static list only — failing closed, so a
- * Telegram hiccup can never make a stranger an admin.
+ * works before the bot has talked to the group; the live member list is the
+ * truth after someone is promoted or demoted. If the live lookup fails we fall
+ * back to the static list only — failing closed, so a Telegram hiccup can never
+ * make a stranger an admin.
  */
 export class AdminResolver {
   private readonly env: Env;
-  private readonly tg: Telegram;
-  private readonly store: Store;
+  private readonly api: Telegram;
   private readonly now: () => number;
+  private readonly cache = new LRUCache<string, MemberRights>({ max: 5_000, ttl: MEMBER_RIGHT_TTL_MS });
+  private readonly groupAdmins = new LRUCache<number, { ids: number[]; ok: boolean }>({ max: 2_000, ttl: ADMIN_TTL_MS });
 
-  // Explicit field assignments, not parameter properties: Node's `--experimental
-  // -strip-types` (which the tests and the polling runner use) rejects the
-  // shorthand outright.
-  constructor(env: Env, tg: Telegram, store: Store, now: () => number) {
+  constructor(env: Env, api: Telegram, now: () => number) {
     this.env = env;
-    this.tg = tg;
-    this.store = store;
+    this.api = api;
     this.now = now;
   }
 
@@ -92,7 +207,7 @@ export class AdminResolver {
     return String(this.env.ADMIN_IDS ?? "")
       .split(/[,\s]+/)
       .map((part) => part.trim())
-      .filter((part) => /^\d+$/.test(part))
+      .filter((part) => /^-?\d+$/.test(part))
       .map(Number);
   }
 
@@ -100,48 +215,90 @@ export class AdminResolver {
     return this.staticIds().includes(userId);
   }
 
-  async isAdmin(chatId: number, userId: number, opts: { refresh?: boolean } = {}): Promise<boolean> {
-    if (this.isStatic(userId)) return true;
+  async isAdmin(chatId: number, userId: number): Promise<boolean> {
     if (!userId) return false;
-    const ids = await this.liveIds(chatId, opts.refresh === true);
-    return ids.includes(userId);
+    if (this.isStatic(userId)) return true;
+    const member = await this.member(chatId, userId);
+    return member?.status === "creator" || member?.status === "administrator";
   }
 
-  /** Cached `getChatAdministrators`. A negative result is cached briefly only. */
-  async liveIds(chatId: number, refresh = false): Promise<number[]> {
-    const key = `admins:${chatId}`;
-    if (!refresh) {
-      const raw = await this.store.get(key);
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw) as { ids: number[]; at: number; ok: boolean };
-          const ttl = parsed.ok ? ADMIN_CACHE_TTL : ADMIN_CACHE_MISS_TTL;
-          if (this.now() - parsed.at < ttl * 1000) return parsed.ids;
-        } catch {
-          // Corrupt cache is the same as no cache.
-        }
-      }
-    }
+  /**
+   * Right check, not just "is an admin". A group can promote someone to
+   * "delete messages only"; `/ban` must then be refused, or the bot becomes a
+   * privilege-escalation path inside the group.
+   */
+  async can(chatId: number, userId: number, right: Right): Promise<boolean> {
+    if (!userId) return false;
+    if (this.isStatic(userId)) return true;
+    const member = await this.member(chatId, userId);
+    if (!member) return false;
+    if (member.status === "creator") return true;
+    if (member.status !== "administrator") return false;
+    // Anonymous admins post as the group, so a command attributed to a real
+    // user id from an anonymous admin cannot be verified; deny rather than
+    // allow a member to ride on it.
+    if (member.rights.is_anonymous === true) return false;
+    return member.rights[right] === true;
+  }
 
-    const res = await this.tg.call<{ user: TgUser; status: string }[]>("getChatAdministrators", {
-      chat_id: chatId,
-    });
+  /** Drop cached answers for a chat after a promotion/demotion. */
+  invalidate(chatId: number): void {
+    this.groupAdmins.delete(chatId);
+    // Keys are `chat:user`; LRU has no prefix delete, and membership changes are
+    // rare enough that clearing the whole member cache is the honest cheap move.
+    this.cache.clear();
+  }
+
+  async liveIds(chatId: number, refresh = false): Promise<number[]> {
+    if (!refresh) {
+      const cached = this.groupAdmins.get(chatId);
+      if (cached) return cached.ids;
+    }
+    const res = await this.api.call<{ user: TgUser; status: string }[]>("getChatAdministrators", { chat_id: chatId });
     if (!res.ok) {
-      await this.store.put(key, JSON.stringify({ ids: [], at: this.now(), ok: false }), ADMIN_CACHE_MISS_TTL * 2);
+      this.groupAdmins.set(chatId, { ids: [], ok: false });
       return [];
     }
     const ids = res.result
-      .filter((member) => member.status === "creator" || member.status === "administrator")
-      .map((member) => member.user.id)
-      .filter((id) => !isBotId(id));
-    await this.store.put(key, JSON.stringify({ ids, at: this.now(), ok: true }), ADMIN_CACHE_TTL * 2);
+      .filter((entry) => entry.status === "creator" || entry.status === "administrator")
+      .map((entry) => entry.user.id)
+      .filter((id) => Number.isFinite(id) && id > 0);
+    this.groupAdmins.set(chatId, { ids, ok: true });
     return ids;
   }
-}
 
-function isBotId(id: number): boolean {
-  // Bot ids are negative in some legacy payloads; nothing to do with identity.
-  return !Number.isFinite(id) || id <= 0;
+  private async member(chatId: number, userId: number): Promise<MemberRights | null> {
+    const key = `${chatId}:${userId}`;
+    const cached = this.cache.get(key);
+    if (cached) return cached;
+    const res = await this.api.call<{
+      status: string;
+      is_anonymous?: boolean;
+      can_delete_messages?: boolean;
+      can_restrict_members?: boolean;
+      can_pin_messages?: boolean;
+      can_change_info?: boolean;
+      can_invite_users?: boolean;
+      can_promote_members?: boolean;
+    }>("getChatMember", { chat_id: chatId, user_id: userId });
+    if (!res.ok) {
+      // Not cached: a failed lookup is "no opinion", and caching it would lock
+      // an admin out of their own group for five minutes.
+      return null;
+    }
+    const rights: Record<string, boolean> = {
+      is_anonymous: res.result.is_anonymous === true,
+      can_delete_messages: res.result.can_delete_messages === true,
+      can_restrict_members: res.result.can_restrict_members === true,
+      can_pin_messages: res.result.can_pin_messages === true,
+      can_change_info: res.result.can_change_info === true,
+      can_invite_users: res.result.can_invite_users === true,
+      can_promote_members: res.result.can_promote_members === true,
+    };
+    const entry = { status: res.result.status, rights, at: this.now() };
+    this.cache.set(key, entry);
+    return entry;
+  }
 }
 
 // ---------------------------------------------------------------------------

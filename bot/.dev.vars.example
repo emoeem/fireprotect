@@ -1,10 +1,21 @@
-# 本机长轮询用的变量。复制成 .dev.vars 后填写。
+# 本机长轮询 / worker:dev 用的变量。复制成 .dev.vars 后填写。
 # 这个文件不要提交：令牌等同于机器人本身。
 BOT_TOKEN=
 ADMIN_IDS=
 # 可选：审核记录发到哪里
 LOG_CHAT_ID=
-# 可选：置空则用 BOT_TOKEN 派生签名密钥
+# /install 的安装密钥；worker 上必填，本机长轮询可不填
 WEBHOOK_SECRET=
-# 状态落盘目录（规则、待验证名单、警告次数）
-BOT_DATA_DIR=.bot-data
+
+# 外部反垃圾（全部默认关闭，fail-open）
+# CAS 需要 Combot API key，没有 key 时 CAS 一律 401
+CAS_KEY=
+FEDERATION_URL=
+FEDERATION_TOKEN=
+
+# 夜间模式时区（分钟，东经为正）
+TZ_OFFSET=480
+
+# 本机存储位置
+BOT_DB=bot.db
+BOT_STORE=.bot-store

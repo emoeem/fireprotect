@@ -1,28 +1,45 @@
-# 焰卫 · Cloudflare Worker 部署
+# 焰卫 · Cloudflare Worker 部署配置
 #
-# 1. 建一个 KV 命名空间存每群规则与验证状态：
-#      npx wrangler kv namespace create STORE
-#    把输出的 id 填到下面，并把整段 kv_namespaces 的注释去掉。
-# 2. 设密钥（不要写进本文件）：
-#      npx wrangler secret put BOT_TOKEN
-#      npx wrangler secret put WEBHOOK_SECRET      # 可选，但强烈建议
-# 3. npx wrangler deploy
-# 4. 浏览器打开 https://<worker 域名>/install 完成接入。
+# 密钥（不要写进本文件）：
+#   npx wrangler secret put BOT_TOKEN
+#   npx wrangler secret put WEBHOOK_SECRET      # /install 的安装密钥
+#   npx wrangler secret put CAS_KEY             # 可选，CAS 需要 Combot API key
+#   npx wrangler secret put FEDERATION_URL      # 可选，自建联邦名单
+#   npx wrangler secret put FEDERATION_TOKEN    # 可选
+#
+# 部署：npx wrangler deploy
+# 接入：浏览器打开 https://<worker 域名>/install，填入 WEBHOOK_SECRET
+#
+# 存储分工：KV 放热状态（每群配置、待验证、进群时间），D1 放可查询的记录
+#（处置事件、警告、说明、自动回复、共享黑名单）。两者都在本文件绑定。
 
 name = "flareward-bot"
 main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 
-# 不接 KV 也能跑：会退化成 per-isolate 内存，重启即丢规则与待验证名单。
-# kv_namespaces = [
-#   { binding = "STORE", id = "REPLACE_WITH_KV_ID" }
-# ]
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "STORE"
+id = "cd8cf0be6a824594812c73a6a6a001f8"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "flareward-bot"
+database_id = "34f771fc-7621-4079-b040-894ba095375b"
+
+# 每分钟一次：关闭过期的验证窗口。这是边缘上唯一可靠的定时器。
+[triggers]
+crons = ["* * * * *"]
 
 [vars]
-# 管理员数字 ID，逗号分隔。群里手动设为管理员的人不需要写在这里。
+# 管理员数字 ID，逗号分隔。群里手动设为管理员的人不必写在这里。
 ADMIN_IDS = ""
-# 可选：审核记录发到这个频道/群。
+# 审核记录默认发到这里；每群还可以用 /logs 覆盖。
 LOG_CHAT_ID = ""
+# 夜间模式使用的时区（分钟，东经为正）。默认 +480。
+TZ_OFFSET = "480"
+ENVIRONMENT = "production"
 
 [observability]
 enabled = true

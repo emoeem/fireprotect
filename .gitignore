@@ -28,3 +28,9 @@ bot/.dev.vars
 bot/.bot-data/
 bot/.wrangler/
 bot/node_modules/
+
+# bot local database / file store
+bot/*.db
+bot/*.db-wal
+bot/*.db-shm
+bot/.bot-store/

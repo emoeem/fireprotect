@@ -1,101 +1,123 @@
-import type { Ctx } from "./context.ts";
-import { escapeHtml, safeEqual } from "./telegram.ts";
-import { commandList } from "./router.ts";
+/**
+ * HTTP surface: the install page, a health probe, and the webhook route.
+ *
+ * `/install` is the one thing here an attacker would want: pointing a bot's
+ * webhook at their own server steals every update. So it needs the deployment's
+ * secret. When no `WEBHOOK_SECRET` is configured the page still renders but the
+ * POST is refused — an unauthenticated installer is worse than a manual step.
+ */
+import { escape as escapeEntities } from "he";
 import type { Env } from "./types.ts";
 
+const API = "https://api.telegram.org";
+
 /**
- * Webhook installation.
+ * The secret Telegram echoes back on every webhook call.
  *
- * The template performed setWebhook on a GET with the secret in the query
- * string, so a link preview or a bot crawling the URL silently re-pointed the
- * webhook. GET now only renders a form; the mutation is a POST whose body
- * carries the key.
+ * Derived from BOT_TOKEN when the operator did not set one, so "no secret
+ * configured" never means "no check". BOT_TOKEN is known to Telegram and to the
+ * deployment, and to nobody else.
  */
-export function installPage(env: Env, message?: string): string {
-  const hasSecret = Boolean(env.WEBHOOK_SECRET);
-  const hint = hasSecret
-    ? "输入你在 Cloudflare 里设置的 WEBHOOK_SECRET。"
-    : "没有设置 WEBHOOK_SECRET：将用 BOT_TOKEN 派生 webhook 密钥，只点下面的按钮即可。";
-  const banner = message ? `<p class="ok">${escapeHtml(message)}</p>` : "";
-  return html(
-    "接入 Telegram",
-    `<h1>接入 Telegram</h1>
-<p class="muted">这一步把 Telegram 的消息指到本服务。</p>
-${banner}
-<form method="post" action="/install">
-  ${hasSecret ? `<label>WEBHOOK_SECRET<input name="key" type="password" autocomplete="off" required></label>` : ""}
-  <button type="submit">接上 Telegram</button>
-</form>
-<p class="muted">${escapeHtml(hint)}</p>
-<p class="muted">接好之后：把我拉进群 → 设为管理员 → 打开「删除消息」「封禁用户」「置顶消息」→ 到 @BotFather 发送 /setprivacy 选 Disable。</p>`,
-  );
+export async function webhookSecret(env: Env): Promise<string> {
+  if (env.WEBHOOK_SECRET) return env.WEBHOOK_SECRET;
+  const data = new TextEncoder().encode(`wh:${env.BOT_TOKEN ?? ""}`);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 40);
 }
 
-export function installResultPage(ok: boolean, detail: string): string {
-  return html(
-    ok ? "已经接上" : "没接上",
-    `<h1>${ok ? "已经接上 Telegram" : "没接上"}</h1><p class="${ok ? "ok" : "bad"}">${escapeHtml(detail)}</p>
-${ok ? '<p class="muted">现在把我拉进群，并设为管理员。</p>' : '<p class="muted">检查 BOT_TOKEN 是否正确，然后刷新本页重试。</p>'}`,
-  );
-}
-
-export function statusPage(env: Env): string {
-  return html(
-    "焰卫在线",
-    `<h1>焰卫在线</h1>
-<p class="muted">服务已经起来了。${env.BOT_TOKEN ? "BOT_TOKEN 已配置。" : "还缺 BOT_TOKEN。"}</p>
-<p><a href="/install">去接入 Telegram →</a></p>`,
-  );
-}
-
-/** Render the page the browser sees when the webhook is (re)pointed. */
-export async function performInstall(ctx: Ctx, key: string, origin: string): Promise<{ ok: boolean; detail: string }> {
-  const env = ctx.env;
-  if (!env.BOT_TOKEN) return { ok: false, detail: "还没有 BOT_TOKEN：先到环境变量里添加，再回来。" };
-
-  const expected = env.WEBHOOK_SECRET || env.BOT_TOKEN;
-  if (env.WEBHOOK_SECRET && !safeEqual(key, env.WEBHOOK_SECRET)) {
-    return { ok: false, detail: "钥匙不对。" };
-  }
-  if (!expected) return { ok: false, detail: "缺少密钥，无法安全地接收更新。" };
-
-  const me = await ctx.tg.call<{ username?: string }>("getMe", {});
-  if (!me.ok) return { ok: false, detail: `BOT_TOKEN 无效：${me.error}` };
-
-  const hook = await ctx.tg.call("setWebhook", {
-    url: `${origin.replace(/\/$/, "")}/`,
-    secret_token: expected,
-    allowed_updates: ["message", "edited_message", "callback_query", "my_chat_member"],
-    // Never drop queued updates: re-running /install used to silently discard
-    // everything sent while the deployment was being fixed.
-    drop_pending_updates: false,
-    max_connections: 40,
-  });
-  if (!hook.ok) return { ok: false, detail: `setWebhook 失败：${hook.error}` };
-
-  const commands = await ctx.tg.call("setMyCommands", { commands: commandList() });
-  const who = me.result.username ? `@${me.result.username}` : "你的机器人";
-  const tail = commands.ok ? "命令菜单也写好了。" : `命令菜单没写成（${commands.ok ? "" : commands.error}），不影响收消息。`;
-  return { ok: true, detail: `${who} 会把消息送到这个地址。${tail}` };
-}
-
-function html(title: string, body: string): string {
+export function renderInstallPage(env: Env, message = ""): string {
+  const configured = Boolean(env.WEBHOOK_SECRET);
+  const body = message ? `<p class="msg">${escapeEntities(message)}</p>` : "";
   return `<!doctype html>
-<html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${escapeHtml(title)}</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>焰卫 · 接入</title>
 <style>
-  :root{color-scheme:dark}
-  body{margin:0;background:#14110e;color:#f3ece3;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.6}
-  main{max-width:34rem;margin:0 auto;padding:3rem 1.25rem}
-  h1{font-size:1.6rem;font-weight:560;margin:0 0 1rem}
-  .muted{color:#b3a496;font-size:.92rem}
-  .ok{color:#8fd6a3}.bad{color:#f0917f}
-  form{margin:1.5rem 0}
-  label{display:block;font-size:.85rem;color:#b3a496;margin-bottom:1rem}
-  input{display:block;width:100%;margin-top:.4rem;padding:.6rem .7rem;border-radius:.5rem;border:1px solid #3a322a;background:#1d1814;color:inherit;font:inherit}
-  button{padding:.65rem 1.1rem;border-radius:.5rem;border:0;background:#e8c9a0;color:#231a12;font-weight:600;cursor:pointer}
-  a{color:#e8c9a0}
-</style>
-<main>${body}</main>
-`;
+:root{color-scheme:dark}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0f14;color:#e6edf3;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif}
+main{width:min(560px,92vw);padding:28px;border:1px solid #1f2a37;border-radius:14px;background:#111823}
+h1{margin:0 0 6px;font-size:20px}
+p{margin:10px 0;color:#9fb0c3}
+code{background:#0b0f14;padding:2px 6px;border-radius:6px;color:#c9d6e4}
+label{display:block;margin:18px 0 6px;color:#c9d6e4}
+input{width:100%;padding:10px 12px;border-radius:10px;border:1px solid #24303d;background:#0b0f14;color:#e6edf3;font:inherit}
+button{margin-top:14px;width:100%;padding:11px;border:0;border-radius:10px;background:#2f81f7;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.msg{margin-top:14px;padding:10px 12px;border-radius:10px;background:#1b2530;color:#e6edf3}
+.warn{color:#f0b429}
+</style></head>
+<body><main>
+<h1>焰卫 · 接入</h1>
+<p>把本部署的 webhook 指向当前域名，Telegram 之后才会把消息推过来。</p>
+${body}
+${configured ? "" : '<p class="warn">这个部署没有设置 <code>WEBHOOK_SECRET</code>，所以页面不接受安装。先执行 <code>wrangler secret put WEBHOOK_SECRET</code> 再来。</p>'}
+<form method="post" action="/install">
+<label for="key">部署密钥（WEBHOOK_SECRET）</label>
+<input id="key" name="key" type="password" autocomplete="off" required>
+<button type="submit">注册 webhook</button>
+</form>
+<p>注册后可以在群里发 <code>/help</code> 查看命令。健康检查：<code>/health</code></p>
+</main></body></html>`;
+}
+
+export type InstallResult = { status: number; body: string; html: boolean };
+
+export async function handleInstall(request: Request, env: Env): Promise<InstallResult> {
+  if (request.method === "GET") {
+    return { status: 200, body: renderInstallPage(env), html: true };
+  }
+  if (request.method !== "POST") {
+    return { status: 405, body: "method not allowed", html: false };
+  }
+
+  if (!env.WEBHOOK_SECRET) {
+    return { status: 403, body: renderInstallPage(env, "部署没有配置 WEBHOOK_SECRET，拒绝远程安装。"), html: true };
+  }
+
+  const contentType = request.headers.get("content-type") ?? "";
+  let key = "";
+  let target = "";
+  if (contentType.includes("application/json")) {
+    const body = (await request.json().catch(() => ({}))) as { key?: string; url?: string };
+    key = String(body.key ?? "");
+    target = String(body.url ?? "");
+  } else {
+    const form = await request.formData().catch(() => null);
+    key = String(form?.get("key") ?? "");
+    target = String(form?.get("url") ?? "");
+  }
+
+  if (key !== env.WEBHOOK_SECRET) {
+    return { status: 403, body: renderInstallPage(env, "密钥不对。"), html: true };
+  }
+
+  const base = target || env.PUBLIC_URL || new URL(request.url).origin;
+  const webhookUrl = `${String(base).replace(/\/+$/, "")}/webhook`;
+  const secret = await webhookSecret(env);
+
+  const res = await fetch(`${API}/bot${env.BOT_TOKEN}/setWebhook`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      url: webhookUrl,
+      secret_token: secret,
+      allowed_updates: ["message", "callback_query", "my_chat_member", "chat_member", "chat_join_request"],
+      drop_pending_updates: false,
+    }),
+  });
+  const payload = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
+  if (!payload.ok) {
+    return { status: 502, body: renderInstallPage(env, `Telegram 拒绝：${payload.description ?? res.status}`), html: true };
+  }
+  return { status: 200, body: renderInstallPage(env, `已注册：${webhookUrl}`), html: true };
+}
+
+export function healthBody(env: Env): { ok: boolean; bot: boolean; db: boolean; env: string } {
+  return {
+    ok: true,
+    bot: Boolean(env.BOT_TOKEN),
+    db: Boolean(env.DB),
+    env: env.ENVIRONMENT ?? "production",
+  };
 }

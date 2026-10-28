@@ -1,85 +1,78 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { charLength, floodExceeded, hasLink, hitKeyword, inspect, isChannelPost, isForward } from "../src/filters.ts";
-import { DEFAULT_RULES } from "../src/rules.ts";
-import { makeCtx, message, user } from "./harness.ts";
+import { test } from "node:test";
+import { DEFAULT_CONFIG, applyPatch } from "../src/rules.ts";
+import { hasLink, inspect, isChannelPost, kindsOf } from "../src/filters.ts";
+import { message } from "./harness.ts";
 
-test("hasLink catches a bare domain the scheme-only check missed", () => {
-  assert.equal(hasLink(message({ text: "去 abc.com 看看" })), true);
-  assert.equal(hasLink(message({ text: "https://x" })), true);
-  // A decimal number is not a host: 3.14 must not trip the domain pattern.
-  assert.equal(hasLink(message({ text: "圆周率 3.14 够了" })), false);
-  assert.equal(hasLink(message({ text: "没有链接" })), false);
+const base = (patch: Record<string, unknown> = {}) => applyPatch(DEFAULT_CONFIG, { keywords: [], locks: [], newbieHours: 0, ...patch });
+const now = 1_700_000_000_000;
+
+test("bare hostnames count as links", () => {
+  assert.equal(hasLink(message({ text: "看 abc.com" })), true);
+  assert.equal(hasLink(message({ text: "t.me/+abc" })), true);
+  assert.equal(hasLink(message({ text: "hello there" })), false);
 });
 
-test("hasLink trusts entities, where the visible text says nothing", () => {
-  const msg = message({
-    text: "点这里",
-    entities: [{ type: "text_link", offset: 0, length: 3, url: "https://evil.example" }],
-  });
+test("text_link entities are caught even when the visible text says nothing", () => {
+  const msg = message({ text: "点这里", entities: [{ type: "text_link", offset: 0, length: 3, url: "https://x.example" }] });
   assert.equal(hasLink(msg), true);
 });
 
-test("hitKeyword is case-insensitive and returns the matched word", () => {
-  assert.equal(hitKeyword("加我 WeChat 详聊", ["加微信", "wechat"]), "wechat");
-  assert.equal(hitKeyword("干净的话", ["加微信"]), "");
+test("a locked type is deleted with a readable reason", () => {
+  const verdict = inspect({ msg: message({ photo: [{}] }), config: base({ locks: ["photos"] }), nowMs: now });
+  assert.equal(verdict.hit, true);
+  assert.equal(verdict.hit && verdict.kind, "lock");
+  assert.match(verdict.hit ? verdict.reason : "", /图片/);
 });
 
-test("charLength counts a reader's characters, not UTF-16 units", () => {
-  assert.equal(charLength("😀😀"), 2);
+test("an unlocked type passes", () => {
+  const verdict = inspect({ msg: message({ photo: [{}] }), config: base({ locks: ["videos"] }), nowMs: now });
+  assert.equal(verdict.hit, false);
 });
 
-test("isChannelPost needs a sender_chat different from the chat itself", () => {
-  assert.equal(isChannelPost(message({ sender_chat: { id: -2002, type: "channel", title: "频道" } })), true);
-  assert.equal(isChannelPost(message({ sender_chat: { id: -1001, type: "supergroup" } })), false);
-  assert.equal(isChannelPost(message()), false);
+test("keywords outrank a lock and name the word", () => {
+  const verdict = inspect({ msg: message({ text: "加微信 123" }), config: base({ keywords: ["加微信"], locks: ["links"] }), nowMs: now });
+  assert.equal(verdict.hit && verdict.kind, "keyword");
+  assert.match(verdict.hit ? verdict.reason : "", /加微信/);
 });
 
-test("isForward covers the modern forward_origin field", () => {
-  assert.equal(isForward(message({ forward_origin: { type: "hidden_user" } })), true);
-  assert.equal(isForward(message({ forward_from: user(7) })), true);
-  assert.equal(isForward(message()), false);
+test("newcomers are blocked from links inside the window and clear after it", () => {
+  const config = base({ newbieHours: 24, newbieBlocks: ["links"] });
+  const joinedAt = now - 60 * 60_000;
+  const inside = inspect({ msg: message({ text: "http://spam.example" }), config, nowMs: now, joinedAt });
+  assert.equal(inside.hit && inside.kind, "newbie");
+
+  const after = inspect({ msg: message({ text: "http://spam.example" }), config, nowMs: now, joinedAt: now - 25 * 60 * 60_000 });
+  assert.equal(after.hit, false);
 });
 
-test("inspect ranks filters in a stable order and names the reason", () => {
-  const rules = { ...DEFAULT_RULES, keywords: ["博彩"], maxLength: 10 };
-  assert.deepEqual(inspect(message({ text: "博彩 https://x" }), rules), {
-    hit: true,
-    reason: "命中关键词「博彩」",
-    kind: "keyword",
-  });
-  assert.deepEqual(inspect(message({ text: "看 https://x" }), rules), {
-    hit: true,
-    reason: "含链接",
-    kind: "link",
-  });
-  // maxLength 0 means "off", not "everything is too long".
-  assert.deepEqual(inspect(message({ text: "一二三四五六七八九十十一" }), { ...rules, maxLength: 0 }), { hit: false });
-  assert.deepEqual(inspect(message({ text: "一二三四五六七八九十十一" }), rules), {
-    hit: true,
-    reason: "超过 10 字",
-    kind: "length",
-  });
+test("a trusted member skips the newcomer window", () => {
+  const config = base({ newbieHours: 24, newbieBlocks: ["links"] });
+  const verdict = inspect({ msg: message({ text: "http://ok.example" }), config, nowMs: now, joinedAt: now - 1000, trusted: true });
+  assert.equal(verdict.hit, false);
 });
 
-test("floodExceeded triggers only past the limit and trims its window", async () => {
-  const { ctx, advance } = makeCtx();
-  const rules = { floodLimit: 2, floodWindow: 10 } as never;
-  const msg = message({ chat: { id: -1001, type: "supergroup" }, from: user(77) });
-
-  assert.equal(await floodExceeded(ctx, msg, rules), false);
-  assert.equal(await floodExceeded(ctx, msg, rules), false);
-  assert.equal(await floodExceeded(ctx, msg, rules), true);
-
-  // Ten seconds later the window has moved on entirely.
-  advance(11_000);
-  assert.equal(await floodExceeded(ctx, msg, rules), false);
+test("length uses characters, not code units", () => {
+  const config = base({ maxLength: 3 });
+  const verdict = inspect({ msg: message({ text: "😀😀😀😀" }), config, nowMs: now });
+  assert.equal(verdict.hit && verdict.kind, "length");
 });
 
-test("floodExceeded is inert when the limit is zero", async () => {
-  const { ctx } = makeCtx();
-  const rules = { floodLimit: 0, floodWindow: 10 } as never;
-  for (let i = 0; i < 50; i++) {
-    assert.equal(await floodExceeded(ctx, message({ from: user(88) }), rules), false);
-  }
+test("a heuristic score at the threshold is a hit", () => {
+  const config = base();
+  assert.equal(inspect({ msg: message(), config, nowMs: now, heuristicScore: 59 }).hit, false);
+  const hit = inspect({ msg: message(), config, nowMs: now, heuristicScore: 60 });
+  assert.equal(hit.hit && hit.kind, "heuristic");
+});
+
+test("channel senders are recognised and lockable", () => {
+  const msg = message({ sender_chat: { id: -1009, type: "channel", title: "频道" } });
+  assert.equal(isChannelPost(msg), true);
+  assert.deepEqual(kindsOf(msg).includes("channels"), true);
+  const verdict = inspect({ msg, config: base({ locks: ["channels"] }), nowMs: now });
+  assert.equal(verdict.hit && verdict.lock, "channels");
+});
+
+test("a normal message from a member trips nothing", () => {
+  assert.equal(inspect({ msg: message({ text: "今天开会吗" }), config: base(), nowMs: now }).hit, false);
 });

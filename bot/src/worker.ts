@@ -1,108 +1,108 @@
-import { createContext, type Ctx } from "./context.ts";
-import { installPage, installResultPage, performInstall, statusPage } from "./install.ts";
-import { handleUpdate } from "./router.ts";
-import { kvStore } from "./store.ts";
-import { safeEqual, type Telegram } from "./telegram.ts";
-import type { Env, Store } from "./types.ts";
-
-/** Only the bit of `ExecutionContext` we use. */
-export type WorkerExec = { waitUntil: (promise: Promise<unknown>) => void };
-
-const MAX_BODY = 1_000_000;
-
-export type WorkerOverrides = { tg?: Telegram; store?: Store };
-
 /**
- * Cloudflare Worker entry point.
+ * Cloudflare Worker entry.
  *
- * The webhook POST is authenticated unconditionally against
- * `WEBHOOK_SECRET || BOT_TOKEN`. The previous template skipped the check when
- * the secret was empty — which was the default — turning every fresh
- * deployment into an unauthenticated remote control for the bot.
+ * Responds 200 immediately and finishes the update in `waitUntil`: Telegram
+ * retries anything slower than its own patience, and a retried `/ban` is a
+ * second ban. The per-update dedupe in `bot.ts` plus this early ack is what
+ * makes redelivery harmless.
  *
- * Built through a factory so tests can inject a fake Bot API without a real
- * network call; `export default` below is the production instance.
+ * `scheduled()` runs once a minute (see `wrangler.toml`) and is the only
+ * reliable timer on the edge — it closes expired verification windows.
  */
-export function makeWorker(overrides: WorkerOverrides = {}) {
-  const ctxFor = (env: Env): Ctx =>
-    createContext(env, {
-      store: overrides.store ?? (env.STORE ? kvStore(env.STORE) : undefined),
-      tg: overrides.tg,
-    });
+import { handleUpdate } from "./bot.ts";
+import { createRuntime, ensureSchema, type Runtime } from "./context.ts";
+import { openD1 } from "./db/d1.ts";
+import { handleInstall, healthBody, webhookSecret } from "./install.ts";
+import { sweepExpired } from "./handlers/verify.ts";
+import { safeEqual } from "./telegram.ts";
+import type { Env, TgUpdate } from "./types.ts";
 
-  return {
-    async fetch(request: Request, env: Env, exec: WorkerExec): Promise<Response> {
-      const url = new URL(request.url);
-      const path = url.pathname.replace(/\/+$/, "") || "/";
+type ExecutionCtx = { waitUntil(promise: Promise<unknown>): void };
 
-      if (request.method === "GET" || request.method === "HEAD") {
-        if (path === "/install") return new Response(installPage(env), { headers: htmlHeaders() });
-        if (path === "/") return new Response(statusPage(env), { headers: htmlHeaders() });
-        return new Response("not found", { status: 404 });
-      }
+type Cache = { env: Env; runtime: Runtime };
+let cached: Cache | null = null;
 
-      if (request.method === "POST" && path === "/install") {
-        // Read the body once: a failed `formData()` has already consumed it, so
-        // `request.clone().json()` afterwards would throw "body used" — the JSON
-        // fallback was dead code until this was a single `text()` read.
-        let key = "";
-        try {
-          const raw = await request.text();
-          key = new URLSearchParams(raw).get("key") ?? "";
-          if (!key) {
-            try {
-              key = String((JSON.parse(raw) as { key?: string }).key ?? "");
-            } catch {
-              key = "";
-            }
-          }
-        } catch {
-          key = "";
-        }
-        const result = await performInstall(ctxFor(env), key, url.origin);
-        return new Response(installResultPage(result.ok, result.detail), {
-          status: result.ok ? 200 : 400,
-          headers: htmlHeaders(),
-        });
-      }
-
-      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
-      if (path !== "/") return new Response("not found", { status: 404 });
-
-      const expected = env.WEBHOOK_SECRET || env.BOT_TOKEN || "";
-      if (!expected) return new Response("not configured", { status: 503 });
-
-      const got = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
-      if (!safeEqual(got, expected)) return new Response("unauthorized", { status: 401 });
-
-      const length = Number(request.headers.get("content-length") ?? "0");
-      if (length > MAX_BODY) return new Response("too large", { status: 413 });
-
-      let update: unknown;
-      try {
-        update = await request.json();
-      } catch {
-        return new Response("bad json", { status: 400 });
-      }
-
-      // Acknowledge immediately: Telegram retries on any non-2xx and on a slow
-      // reply, which would replay the same moderation action several times.
-      exec.waitUntil(
-        handleUpdate(ctxFor(env), update as never).catch((err: unknown) => {
-          console.log("update failed:", err instanceof Error ? err.message : String(err));
-        }),
-      );
-      return Response.json({ ok: true });
-    },
-  };
+function runtimeFor(env: Env): Runtime {
+  if (cached && cached.env === env) return cached.runtime;
+  if (!env.DB) {
+    throw new Error("D1 绑定 DB 缺失：在 wrangler.toml 里配置 d1_databases 并执行 wrangler d1 create");
+  }
+  const sqlite = openD1(env.DB);
+  const runtime = createRuntime(env, { sqlite });
+  cached = { env, runtime };
+  return runtime;
 }
 
-export default makeWorker();
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionCtx): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
 
-function htmlHeaders(): Record<string, string> {
-  return {
-    "content-type": "text/html; charset=utf-8",
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
-  };
+    if (path === "/health") {
+      const body = healthBody(env);
+      try {
+        const runtime = runtimeFor(env);
+        await ensureSchema(runtime.sql);
+      } catch (err) {
+        return json({ ...body, ok: false, error: err instanceof Error ? err.message : String(err) }, 503);
+      }
+      return json(body);
+    }
+
+    if (path === "/install") {
+      const result = await handleInstall(request, env);
+      return new Response(result.body, {
+        status: result.status,
+        headers: { "content-type": result.html ? "text/html; charset=utf-8" : "text/plain; charset=utf-8" },
+      });
+    }
+
+    if (path === "/webhook") {
+      if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+      const expected = await webhookSecret(env);
+      const got = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
+      if (!safeEqual(got, expected)) return new Response("forbidden", { status: 401 });
+
+      let update: TgUpdate;
+      try {
+        update = (await request.json()) as TgUpdate;
+      } catch {
+        return new Response("bad request", { status: 400 });
+      }
+      try {
+        const runtime = runtimeFor(env);
+        ctx.waitUntil(handleUpdate(runtime, update));
+      } catch (err) {
+        // A configuration error must be visible in the response, otherwise the
+        // operator sees a green webhook and a silent bot.
+        return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 503);
+      }
+      return new Response("ok");
+    }
+
+    if (path === "/") {
+      return new Response("flareward bot: /install · /health · /webhook", { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  },
+
+  async scheduled(_event: unknown, env: Env, ctx: ExecutionCtx): Promise<void> {
+    try {
+      const runtime = runtimeFor(env);
+      await ensureSchema(runtime.sql);
+      ctx.waitUntil(
+        sweepExpired(runtime)
+          .then((result) => {
+            if (result.expired) console.log(`sweep: expired ${result.expired}/${result.checked}`);
+          })
+          .catch((err) => console.log(`sweep failed: ${err instanceof Error ? err.message : String(err)}`)),
+      );
+    } catch (err) {
+      console.log(`scheduled failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  },
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }

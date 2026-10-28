@@ -1,5 +1,5 @@
-import type { Ctx } from "./context.ts";
-import type { ChatRules } from "./rules.ts";
+import type { ChatConfig, LockKind } from "./rules.ts";
+import { lockLabel } from "./rules.ts";
 import type { TgMessage } from "./types.ts";
 
 export type Verdict =
@@ -7,29 +7,54 @@ export type Verdict =
   | {
       hit: true;
       reason: string;
-      /** "flood" needs a different follow-up than a plain content match. */
-      kind: "keyword" | "link" | "forward" | "channel" | "length" | "flood";
+      /** Which rule fired; the caller maps it to an action. */
+      kind:
+        | "keyword"
+        | "lock"
+        | "length"
+        | "newbie"
+        | "heuristic"
+        | "external"
+        | "flood"
+        | "channel"
+        | "forward";
+      lock?: LockKind;
+      score?: number;
     };
 
 const LINK_RE = /https?:\/\//i;
-const BARE_HOST_RE = /(^|[\s(（[【])(?:www\.)?[a-z0-9-]+\.(?:com|net|org|cn|io|me|co|vip|xyz|top|cc|tv|info|app|site|online|shop|link|club|live|pro|fun|wang|tech|store|bid|win|cyou|icu)\b/i;
+const INVITE_RE = /(?:t\.me|telegram\.me)\/(?:\+|joinchat\/)/i;
+const BARE_HOST_RE =
+  /(^|[\s(（[【])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|cn|io|me|co|vip|xyz|top|cc|tv|info|app|site|online|shop|link|club|live|pro|fun|wang|tech|store|bid|win|cyou|icu|ru|in|us|uk|de|jp|kr|hk|tw|sg)\b/i;
+const MENTION_RE = /(^|[^\w@/])@[a-zA-Z][a-zA-Z0-9_]{3,31}\b/;
 
 export function textOf(msg: TgMessage): string {
   return msg.text ?? msg.caption ?? "";
 }
 
+export function allEntities(msg: TgMessage) {
+  return [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
+}
+
 /**
  * Link detection.
  *
- * The template only looked for a scheme, `t.me/` and `www.`, so `abc.com` and
- * a bare `t.me/xxx` (no scheme) passed through. Entity inspection still wins:
- * it catches `text_link`, where the visible text says nothing at all.
+ * Entity inspection still wins: it catches `text_link`, where the visible text
+ * says nothing at all, and hidden URLs in captions.
  */
 export function hasLink(msg: TgMessage): boolean {
   const text = textOf(msg);
-  if (LINK_RE.test(text) || BARE_HOST_RE.test(text)) return true;
-  const entities = [...(msg.entities ?? []), ...(msg.caption_entities ?? [])];
-  return entities.some((entity) => entity.type === "url" || entity.type === "text_link");
+  if (LINK_RE.test(text) || BARE_HOST_RE.test(text) || INVITE_RE.test(text)) return true;
+  return allEntities(msg).some((entity) => entity.type === "url" || entity.type === "text_link");
+}
+
+export function hasInvite(msg: TgMessage): boolean {
+  if (INVITE_RE.test(textOf(msg))) return true;
+  return allEntities(msg).some((entity) => entity.type === "url" && INVITE_RE.test(entity.url ?? ""));
+}
+
+export function hasMention(msg: TgMessage): boolean {
+  return allEntities(msg).some((e) => e.type === "mention" || e.type === "text_mention") || MENTION_RE.test(textOf(msg));
 }
 
 export function hitKeyword(text: string, keywords: string[]): string {
@@ -53,63 +78,78 @@ export function charLength(text: string): number {
   return Array.from(text).length;
 }
 
+/** Every lock category this message falls into. */
+export function kindsOf(msg: TgMessage): LockKind[] {
+  const kinds: LockKind[] = [];
+  if (hasLink(msg)) kinds.push("links");
+  if (msg.photo) kinds.push("photos");
+  if (msg.video) kinds.push("videos");
+  if (msg.sticker) kinds.push("stickers");
+  if (msg.animation) kinds.push("gifs");
+  if (msg.document) kinds.push("files");
+  if (msg.poll) kinds.push("polls");
+  if (msg.voice || msg.video_note || msg.audio) kinds.push("voice");
+  if (isForward(msg)) kinds.push("forwards");
+  if (hasInvite(msg)) kinds.push("invites");
+  if (hasMention(msg)) kinds.push("mentions");
+  if (msg.from?.is_bot) kinds.push("bots");
+  if (isChannelPost(msg)) kinds.push("channels");
+  return kinds;
+}
+
+export type InspectInput = {
+  msg: TgMessage;
+  config: ChatConfig;
+  nowMs: number;
+  /** Join timestamp in ms, when the bot saw the join. */
+  joinedAt?: number;
+  /** Members who were unbanned by hand are exempt from the newbie window. */
+  trusted?: boolean;
+  /** Local heuristic score, computed by `heuristics.ts`. */
+  heuristicScore?: number;
+};
+
 /**
- * Content verdict. Flood is separate because it needs the store and must not
- * run for admins — checking it here keeps every rule in one place for tests.
+ * Content verdict, first match wins.
+ *
+ * Ordering is deliberate: identity-level rules (channel sender, forwards) run
+ * before content rules, and the cheap string checks run before the scoring
+ * model so a keyword hit never pays for a full analysis.
  */
-export function inspect(msg: TgMessage, rules: ChatRules): Verdict {
+export function inspect(input: InspectInput): Verdict {
+  const { msg, config, nowMs, joinedAt, trusted, heuristicScore } = input;
   const text = textOf(msg);
 
-  if (rules.filterChannels && isChannelPost(msg)) {
-    return { hit: true, reason: "以频道身份发言", kind: "channel" };
+  if (config.locks.includes("forwards") && isForward(msg)) {
+    return { hit: true, reason: "转发消息", kind: "forward", lock: "forwards" };
   }
-  if (rules.filterForwards && isForward(msg)) {
-    return { hit: true, reason: "转发消息", kind: "forward" };
-  }
-  const word = hitKeyword(text, rules.keywords);
-  if (word) return { hit: true, reason: `命中关键词「${word}」`, kind: "keyword" };
-  if (rules.filterLinks && hasLink(msg)) {
-    return { hit: true, reason: "含链接", kind: "link" };
-  }
-  if (rules.maxLength > 0 && charLength(text) > rules.maxLength) {
-    return { hit: true, reason: `超过 ${rules.maxLength} 字`, kind: "length" };
-  }
-  return { hit: false };
-}
 
-// ---------------------------------------------------------------------------
-// Flood control
-// ---------------------------------------------------------------------------
-
-export function floodKey(chatId: number, userId: number): string {
-  return `flood:${chatId}:${userId}`;
-}
-
-/**
- * Sliding window kept in the store.
- *
- * Returns `true` when this message crosses the limit. The window is trimmed on
- * every call, so the key never grows past `limit` entries.
- */
-export async function floodExceeded(ctx: Ctx, msg: TgMessage, rules: ChatRules): Promise<boolean> {
-  if (rules.floodLimit <= 0 || !msg.from) return false;
-  const key = floodKey(msg.chat.id, msg.from.id);
-  const now = ctx.now();
-  const windowMs = rules.floodWindow * 1000;
-
-  let stamps: number[] = [];
-  const raw = await ctx.store.get(key);
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed)) stamps = parsed.filter((n): n is number => typeof n === "number");
-    } catch {
-      stamps = [];
+  if (!trusted && config.newbieHours > 0 && joinedAt && nowMs - joinedAt < config.newbieHours * 3_600_000) {
+    if (config.newbieBlocks.includes("links") && hasLink(msg)) {
+      return { hit: true, reason: `入群 ${config.newbieHours} 小时内发链接`, kind: "newbie" };
+    }
+    if (config.newbieBlocks.includes("mentions") && hasMention(msg)) {
+      return { hit: true, reason: `入群 ${config.newbieHours} 小时内提及他人`, kind: "newbie" };
     }
   }
-  stamps = stamps.filter((at) => now - at < windowMs);
-  stamps.push(now);
-  await ctx.store.put(key, JSON.stringify(stamps.slice(-rules.floodLimit * 2)), rules.floodWindow * 2);
 
-  return stamps.length > rules.floodLimit;
+  const word = hitKeyword(text, config.keywords);
+  if (word) return { hit: true, reason: `命中关键词「${word}」`, kind: "keyword" };
+
+  for (const kind of kindsOf(msg)) {
+    if (!config.locks.includes(kind)) continue;
+    // `forwards` is handled above so it keeps its dedicated log wording.
+    if (kind === "forwards") continue;
+    return { hit: true, reason: `本群禁止${lockLabel(kind)}`, kind: "lock", lock: kind };
+  }
+
+  if (config.maxLength > 0 && charLength(text) > config.maxLength) {
+    return { hit: true, reason: `超过 ${config.maxLength} 字`, kind: "length" };
+  }
+
+  if (typeof heuristicScore === "number" && heuristicScore >= 60) {
+    return { hit: true, reason: `本地启发式评分 ${heuristicScore}`, kind: "heuristic", score: heuristicScore };
+  }
+
+  return { hit: false };
 }
