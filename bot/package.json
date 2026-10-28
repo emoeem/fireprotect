@@ -1,0 +1,18 @@
+{
+  "name": "flareward-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "焰卫 — Telegram 群管理机器人，Cloudflare Worker 与本机长轮询共用一套核心",
+  "scripts": {
+    "dev": "node --experimental-strip-types src/node.ts",
+    "worker:dev": "npx wrangler dev",
+    "deploy": "npx wrangler deploy",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:coverage": "node --experimental-strip-types --test --experimental-test-coverage test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

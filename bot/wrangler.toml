@@ -1,0 +1,31 @@
+# 焰卫 · Cloudflare Worker 部署
+#
+# 1. 建一个 KV 命名空间存每群规则与验证状态：
+#      npx wrangler kv namespace create STORE
+#    把输出的 id 填到下面，并把整段 kv_namespaces 的注释去掉。
+# 2. 设密钥（不要写进本文件）：
+#      npx wrangler secret put BOT_TOKEN
+#      npx wrangler secret put WEBHOOK_SECRET      # 可选，但强烈建议
+# 3. npx wrangler deploy
+# 4. 浏览器打开 https://<worker 域名>/install 完成接入。
+
+name = "flareward-bot"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+
+# 不接 KV 也能跑：会退化成 per-isolate 内存，重启即丢规则与待验证名单。
+# kv_namespaces = [
+#   { binding = "STORE", id = "REPLACE_WITH_KV_ID" }
+# ]
+
+[vars]
+# 管理员数字 ID，逗号分隔。群里手动设为管理员的人不需要写在这里。
+ADMIN_IDS = ""
+# 可选：审核记录发到这个频道/群。
+LOG_CHAT_ID = ""
+
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = true

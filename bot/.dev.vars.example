@@ -1,0 +1,10 @@
+# 本机长轮询用的变量。复制成 .dev.vars 后填写。
+# 这个文件不要提交：令牌等同于机器人本身。
+BOT_TOKEN=
+ADMIN_IDS=
+# 可选：审核记录发到哪里
+LOG_CHAT_ID=
+# 可选：置空则用 BOT_TOKEN 派生签名密钥
+WEBHOOK_SECRET=
+# 状态落盘目录（规则、待验证名单、警告次数）
+BOT_DATA_DIR=.bot-data

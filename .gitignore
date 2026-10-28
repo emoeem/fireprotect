@@ -22,3 +22,9 @@ dist/
 .DS_Store
 *.swp
 .grok/preview.pid
+
+# bot local state / secrets (bot/ is a standalone package)
+bot/.dev.vars
+bot/.bot-data/
+bot/.wrangler/
+bot/node_modules/
