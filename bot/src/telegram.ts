@@ -65,6 +65,103 @@ export class Telegram {
     return String(this.token || "").split(":")[0] || "";
   }
 
+  /** `https://api.telegram.org/file/bot<token>/<path>` — the file download base. */
+  get fileBase(): string {
+    return `${API}/file/bot${this.token}`;
+  }
+
+  /**
+   * Download a file attached to a message.
+   *
+   * Telegram has two limits worth guarding: bots may not download files above
+   * 20 MB at all, and a hung download inside a Worker loses the update. Both
+   * are checked here so callers only deal with bytes.
+   */
+  async download(fileId: string, maxBytes = 20 * 1024 * 1024): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error: string }> {
+    const info = await this.call<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId });
+    if (!info.ok) return { ok: false, error: info.error };
+    const size = Number(info.result.file_size ?? 0);
+    if (size > maxBytes) return { ok: false, error: `文件 ${(size / 1048576).toFixed(1)}MB，超过 ${Math.round(maxBytes / 1048576)}MB 上限` };
+    const path = info.result.file_path;
+    if (!path) return { ok: false, error: "Telegram 没有返回 file_path" };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25_000);
+    try {
+      const response = await this.fetchImpl(`${this.fileBase}/${path}`, { signal: controller.signal });
+      if (!response.ok) return { ok: false, error: `下载失败 HTTP ${response.status}` };
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > maxBytes) return { ok: false, error: "下载结果超过大小上限" };
+      return { ok: true, bytes };
+    } catch (err) {
+      return { ok: false, error: errorText(err) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Upload a document with `multipart/form-data` (the only way Bot API takes files). */
+  async sendDocument(
+    chatId: number,
+    bytes: Uint8Array,
+    filename: string,
+    options: { replyTo?: number; caption?: string } = {},
+  ): Promise<TgResult<{ message_id: number }>> {
+    return this.sendMedia("sendDocument", chatId, "document", { bytes, filename }, options);
+  }
+
+  /**
+   * `sendPhoto` / `sendVideo` / `sendDocument`, by URL or by upload.
+   *
+   * The URL form exists because Telegram fetches the file itself: a Worker
+   * cannot reshape a 4 MB image, but it can absolutely hand Telegram the cover
+   * URL from a link preview. The upload form is the self-hosted path.
+   */
+  async sendMedia(
+    method: "sendPhoto" | "sendVideo" | "sendDocument",
+    chatId: number,
+    field: "photo" | "video" | "document",
+    source: { url: string } | { bytes: Uint8Array; filename: string },
+    options: { replyTo?: number; caption?: string } = {},
+  ): Promise<TgResult<{ message_id: number }>> {
+    if (!this.token) return { ok: false, error: "BOT_TOKEN 未设置", code: 0 };
+
+    if ("url" in source) {
+      const body: Record<string, unknown> = { chat_id: chatId, [field]: source.url };
+      if (options.caption) body.caption = options.caption.slice(0, 1000);
+      if (options.replyTo) {
+        body.reply_parameters = JSON.stringify({ message_id: options.replyTo, allow_sending_without_reply: true });
+      }
+      return this.call<{ message_id: number }>(method, body);
+    }
+
+    const form = new FormData();
+    form.set("chat_id", String(chatId));
+    if (options.caption) form.set("caption", options.caption.slice(0, 1000));
+    if (options.replyTo) {
+      form.set("reply_parameters", JSON.stringify({ message_id: options.replyTo, allow_sending_without_reply: true }));
+    }
+    // Slice the exact window: a subarray view is not a `BlobPart` on its own.
+    const view = source.bytes.buffer.slice(source.bytes.byteOffset, source.bytes.byteOffset + source.bytes.byteLength) as ArrayBuffer;
+    form.set(field, new Blob([view], { type: mimeFor(source.filename) }), source.filename);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      // No content-type header: fetch must set the multipart boundary itself.
+      const response = await this.fetchImpl(`${API}/bot${this.token}/${method}`, {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
+      return await this.parse<{ message_id: number }>(response);
+    } catch (err) {
+      return { ok: false, error: errorText(err), code: 0 };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async call<T = unknown>(method: string, body: Record<string, unknown> = {}): Promise<TgResult<T>> {
     let last: TgErr = { ok: false, error: "BOT_TOKEN 未设置", code: 0 };
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
@@ -101,6 +198,10 @@ export class Telegram {
       clearTimeout(timer);
     }
 
+    return this.parse<T>(response);
+  }
+
+  private async parse<T>(response: Response): Promise<TgResult<T>> {
     let payload: unknown;
     try {
       payload = await response.json();
@@ -123,6 +224,17 @@ export class Telegram {
       retryAfter: data.parameters?.retry_after,
     };
   }
+}
+
+/** Telegram checks the MIME type of `sendPhoto`; octet-stream is refused. */
+function mimeFor(filename: string): string {
+  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
+  if (ext === "webp") return "image/webp";
+  if (ext === "mp4") return "video/mp4";
+  if (ext === "pdf") return "application/pdf";
+  return "application/octet-stream";
 }
 
 export function errorText(err: unknown): string {

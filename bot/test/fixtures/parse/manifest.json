@@ -1,0 +1,77 @@
+{
+  "bilibili": {
+    "url": "https://www.bilibili.com/video/BV1HYnh6CEJc",
+    "final": "https://www.bilibili.com/video/BV1HYnh6CEJc/",
+    "status": "200",
+    "recordedAt": "2026-10-28T13:41:23Z",
+    "bytes": 40000,
+    "meta": {
+      "og:type": "video.other",
+      "og:title": "爸爸去哪儿 x Counting Stars_哔哩哔哩_bilibili",
+      "og:description": "我仿佛回到了小学泪目, 视频播放量 898480、弹幕量 2065、点赞数 99477、投硬币枚数 14601、收藏人数 32837、转发人数 5345, 视频作者 神秘天洛元, 作者简介 我是一只北部玄驹，相关视频：⚡草东没有Counti",
+      "og:site_name": "哔哩哔哩",
+      "og:url": "https://www.bilibili.com/video/BV1HYnh6CEJc/",
+      "og:locale": "zh_CN",
+      "og:image": "https://i1.hdslb.com/bfs/archive/a68ec7a6c2682fbc07c3c1e30fc9edb75e7ac465.jpg@1200w_630h",
+      "og:image:secure_url": "https://i1.hdslb.com/bfs/archive/a68ec7a6c2682fbc07c3c1e30fc9edb75e7ac465.jpg@1200w_630h",
+      "og:image:width": "1200",
+      "og:image:height": "630",
+      "og:image:alt": "爸爸去哪儿 x Counting Stars_哔哩哔哩_bilibili",
+      "og:video": "https://player.bilibili.com/player.html?bvid=BV1HYnh6CEJc",
+      "og:video:secure_url": "https://player.bilibili.com/player.html?bvid=BV1HYnh6CEJc",
+      "og:video:type": "text/html",
+      "og:video:width": "1920",
+      "og:video:height": "1080"
+    }
+  },
+  "douyin": {
+    "url": "https://www.douyin.com/discover",
+    "final": "https://www.douyin.com/jingxuan",
+    "status": "200",
+    "recordedAt": "2026-10-28T13:41:24Z",
+    "bytes": 40000,
+    "meta": {}
+  },
+  "xiaohongshu": {
+    "url": "https://www.xiaohongshu.com/explore",
+    "final": "https://www.xiaohongshu.com/login?redirectPath=http%3A%2F%2Fwww.xiaohongshu.com%2Fexplore%3FexSource%3Dnull",
+    "status": "200",
+    "recordedAt": "2026-10-28T13:41:24Z",
+    "bytes": 36242,
+    "meta": {
+      "og:image": "//picasso-static.xiaohongshu.com/fe-platform/e6214e4fbfae2cf14d634d4296916e8a5eaefdf4.png"
+    }
+  },
+  "twitter": {
+    "url": "https://x.com/telegram",
+    "final": "https://x.com/telegram",
+    "status": "200",
+    "recordedAt": "2026-10-28T13:41:25Z",
+    "bytes": 40000,
+    "meta": {
+      "og:site_name": "X (formerly Twitter)",
+      "og:locale": "en_US",
+      "og:type": "profile",
+      "og:url": "https://x.com/telegram",
+      "og:title": "Telegram Messenger (@telegram) on X",
+      "twitter:card": "summary_large_image",
+      "twitter:site": "@x",
+      "twitter:title": "Telegram Messenger (@telegram) on X",
+      "twitter:description": "",
+      "twitter:creator": "@telegram",
+      "twitter:image": "https://pbs.twimg.com/profile_banners/1689053928/1783971691",
+      "twitter:image:alt": "Telegram Messenger",
+      "twitter:label1": "Posts",
+      "twitter:data1": "52.4K",
+      "twitter:label2": "Joined",
+      "twitter:data2": "August 2013",
+      "og:description": "2035061 followers · 9 following. Joined Aug 2013. See the latest conversations with @telegram",
+      "og:image": "https://pbs.twimg.com/profile_images/1183117696730390529/LRDASku7_400x400.jpg",
+      "og:image:secure_url": "https://pbs.twimg.com/profile_images/1183117696730390529/LRDASku7_400x400.jpg",
+      "og:image:type": "image/jpeg",
+      "og:image:width": "400",
+      "og:image:height": "400",
+      "og:image:alt": "Telegram Messenger"
+    }
+  }
+}
