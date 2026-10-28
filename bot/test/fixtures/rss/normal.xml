@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A plain RSS 2.0 feed with three items, newest first (the order real feeds
+     publish in). The guids are stable, which is what the watermark keys on. -->
+<rss version="2.0">
+  <channel>
+    <title>示例源</title>
+    <link>https://example.com/</link>
+    <description>三条消息的测试源</description>
+    <item>
+      <title>第三条：最新的</title>
+      <link>https://example.com/posts/3</link>
+      <guid isPermaLink="false">post-3</guid>
+      <pubDate>Wed, 01 Nov 2025 12:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>第二条：中间那条</title>
+      <link>https://example.com/posts/2</link>
+      <guid isPermaLink="false">post-2</guid>
+      <pubDate>Wed, 01 Nov 2025 11:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>第一条：最旧的</title>
+      <link>https://example.com/posts/1</link>
+      <guid isPermaLink="false">post-1</guid>
+      <pubDate>Wed, 01 Nov 2025 10:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

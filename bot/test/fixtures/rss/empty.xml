@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A feed with no items at all.
+     The `version="2.0"` attribute is not decoration: rss-parser identifies RSS 2
+     by it, and a document without it is rejected as "Feed not recognized as RSS
+     1 or 2" — which would be counted as a parse failure and, after five ticks,
+     would unsubscribe the feed. `notrss.xml` is that exact document, kept so the
+     difference between "valid feed, nothing published yet" and "not a feed" is
+     covered by a test instead of an assumption. -->
+<rss version="2.0">
+  <channel>
+    <title>空源</title>
+    <link>https://example.com/empty</link>
+    <description>暂时没有内容，但 feed 本身是好的</description>
+  </channel>
+</rss>

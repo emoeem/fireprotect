@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Deliberately broken: the <item> is never closed and </channel> closes out of
+     order. The parser must reject this, and the poller must turn that rejection
+     into a failure count instead of an exception escaping the timer. -->
+<rss version="2.0">
+  <channel>
+    <title>坏掉的源</title>
+    <item>
+      <title>这条没关标签</title>
+  </channel>
+</rss>
