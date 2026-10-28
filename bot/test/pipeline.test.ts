@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handleUpdate } from "../src/bot.ts";
-import { warnCount } from "../src/db/repo.ts";
+import { warnCount, warnInc } from "../src/db/repo.ts";
 import { DEFAULT_CONFIG } from "../src/rules.ts";
 import { GROUP, command, makeRuntime, message, nextUpdate, user } from "./harness.ts";
 
@@ -23,7 +23,7 @@ test("a keyword hit is deleted, and the first strike mutes for an hour", async (
   assert.equal(restrict[0]?.body.permissions.can_send_messages, false);
   const until = Number(restrict[0]?.body.until_date);
   assert.ok(until > h.now() / 1000 + 3000, "mute should last about an hour");
-  assert.equal(await warnCount(h.rt.db, GROUP.id, 500), 1);
+  assert.equal(await warnCount(h.rt.db, GROUP.id, 500, h.now()), 1);
 });
 
 test("the second strike mutes for a day, the third bans and clears the count", async () => {
@@ -38,7 +38,7 @@ test("the second strike mutes for a day, the third bans and clears the count", a
 
   await handleUpdate(h.rt, { update_id: nextUpdate(), message: spam() });
   assert.equal(h.fake.count("banChatMember"), 1);
-  assert.equal(await warnCount(h.rt.db, GROUP.id, 500), 0, "a ban resets the ladder");
+  assert.equal(await warnCount(h.rt.db, GROUP.id, 500, h.now()), 0, "a ban resets the ladder");
 });
 
 test("a redelivered update is processed once", async () => {
@@ -48,6 +48,17 @@ test("a redelivered update is processed once", async () => {
   await handleUpdate(h.rt, update);
   await handleUpdate(h.rt, update);
   assert.equal(h.fake.count("deleteMessage"), 1);
+});
+
+test("warnings older than 30 days decay and the ladder starts over", async () => {
+  const h = await makeRuntime();
+  await warnInc(h.rt.db, GROUP.id, 500, h.now());
+  await warnInc(h.rt.db, GROUP.id, 500, h.now());
+  assert.equal(await warnCount(h.rt.db, GROUP.id, 500, h.now()), 2);
+
+  h.advance(31 * 86_400_000);
+  assert.equal(await warnCount(h.rt.db, GROUP.id, 500, h.now()), 0, "a month-old strike is served");
+  assert.equal(await warnInc(h.rt.db, GROUP.id, 500, h.now()), 1, "a fresh warning restarts the ladder");
 });
 
 test("admins are never filtered", async () => {
@@ -60,7 +71,7 @@ test("admins are never filtered", async () => {
 test("a locked media type is deleted", async () => {
   const h = await makeRuntime();
   await seed(h, { keywords: [], locks: ["photos"] });
-  await handleUpdate(h.rt, { update_id: nextUpdate(), message: message({ text: "", photo: [{}] }) });
+  await handleUpdate(h.rt, { update_id: nextUpdate(), message: message({ text: "", photo: [{ file_id: "ph1" }] }) });
   assert.equal(h.fake.count("deleteMessage"), 1);
   assert.match(String(h.fake.find("sendMessage")?.body.text ?? ""), /图片/);
 });

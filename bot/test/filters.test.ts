@@ -19,14 +19,14 @@ test("text_link entities are caught even when the visible text says nothing", ()
 });
 
 test("a locked type is deleted with a readable reason", () => {
-  const verdict = inspect({ msg: message({ photo: [{}] }), config: base({ locks: ["photos"] }), nowMs: now });
+  const verdict = inspect({ msg: message({ photo: [{ file_id: "ph1" }] }), config: base({ locks: ["photos"] }), nowMs: now });
   assert.equal(verdict.hit, true);
   assert.equal(verdict.hit && verdict.kind, "lock");
   assert.match(verdict.hit ? verdict.reason : "", /图片/);
 });
 
 test("an unlocked type passes", () => {
-  const verdict = inspect({ msg: message({ photo: [{}] }), config: base({ locks: ["videos"] }), nowMs: now });
+  const verdict = inspect({ msg: message({ photo: [{ file_id: "ph1" }] }), config: base({ locks: ["videos"] }), nowMs: now });
   assert.equal(verdict.hit, false);
 });
 

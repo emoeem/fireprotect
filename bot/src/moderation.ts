@@ -206,8 +206,12 @@ export async function punishAuto(
 
   if (!options.alreadyDeleted) {
     const removed = await deleteMessages(rt, msg.chat.id, [msg.message_id]);
-    if (removed.ok) acted = true;
-    else if (removed.code !== 400) errors.push(removed.error);
+    if (removed.ok) {
+      acted = true;
+      // Counted separately from the punishment: "deleted 40 messages" and
+      // "muted 3 members" are different facts, and /stats shows both.
+      await record(rt, { chatId: msg.chat.id, userId: author?.id, kind: "delete", reason });
+    } else if (removed.code !== 400) errors.push(removed.error);
   } else {
     acted = true;
   }
@@ -263,23 +267,62 @@ async function applyStrike(
 ): Promise<void> {
   const base = { chatId, userId: author.id, reason: `${reason}（第 ${count} 次）`, byId: 0 };
   if (strike.action === "ban") {
-    await ban(rt, chatId, author.id, strike.minutes);
+    const res = await ban(rt, chatId, author.id, strike.minutes);
+    if (!res.ok) {
+      // Telegram refused (usually: not a member any more). Recording a ban that
+      // never happened would make /stats lie, which is worse than a gap.
+      await record(rt, { ...base, kind: "external", reason: `${base.reason}｜封禁失败：${res.error}` });
+      return;
+    }
     await recordBan(rt, configForStrike, author.id, reason);
     await warnReset(rt.db, chatId, author.id).catch(() => undefined);
     await record(rt, { ...base, kind: "ban", minutes: strike.minutes });
     return;
   }
   if (strike.action === "kick") {
-    await kick(rt, chatId, author.id);
-    await record(rt, { ...base, kind: "kick" });
+    const res = await kick(rt, chatId, author.id);
+    await record(rt, { ...base, kind: res.ok ? "kick" : "external", reason: res.ok ? base.reason : `${base.reason}｜移出失败：${res.error}` });
     return;
   }
   if (strike.action === "mute" && strike.minutes > 0) {
-    await restrict(rt, chatId, author.id, strike.minutes);
-    await record(rt, { ...base, kind: "mute", minutes: strike.minutes });
+    const res = await restrict(rt, chatId, author.id, strike.minutes);
+    await record(rt, {
+      ...base,
+      kind: res.ok ? "mute" : "external",
+      reason: res.ok ? base.reason : `${base.reason}｜禁言失败：${res.error}`,
+      minutes: strike.minutes,
+    });
     return;
   }
   await record(rt, { ...base, kind: "warn" });
+}
+
+/**
+ * A keyword rule configured as "mute".
+ *
+ * Deliberately outside the warning ladder: an admin who chose `keywordAction:
+ * mute` asked for one specific action, not for the third hit to become a ban.
+ * The message is gone either way — a mute that leaves the spam visible is not a
+ * moderation action.
+ */
+export async function muteFor(rt: Runtime, msg: TgMessage, minutes: number, reason: string): Promise<PunishResult> {
+  const errors: string[] = [];
+  const removed = await deleteMessages(rt, msg.chat.id, [msg.message_id]);
+  if (!removed.ok && removed.code !== 400) errors.push(removed.error);
+  if (removed.ok) await record(rt, { chatId: msg.chat.id, userId: msg.from?.id, kind: "delete", reason });
+
+  const author = msg.from;
+  if (!author) return { acted: removed.ok, errors };
+  const muted = await restrict(rt, msg.chat.id, author.id, minutes);
+  await record(rt, {
+    chatId: msg.chat.id,
+    userId: author.id,
+    kind: muted.ok ? "mute" : "external",
+    reason: muted.ok ? reason : `${reason}｜禁言失败：${muted.error}`,
+    minutes,
+  });
+  if (!muted.ok) errors.push(muted.error);
+  return { acted: true, errors };
 }
 
 export function strikeSummary(config: ChatConfig, count: number): string {

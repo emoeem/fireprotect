@@ -1,5 +1,5 @@
-import type { ChatConfig, LockKind } from "./rules.ts";
-import { lockLabel } from "./rules.ts";
+import { matchKeywords } from "./keywords.ts";
+import { lockLabel, type ChatConfig, type LockKind } from "./rules.ts";
 import type { TgMessage } from "./types.ts";
 
 export type Verdict =
@@ -57,12 +57,9 @@ export function hasMention(msg: TgMessage): boolean {
   return allEntities(msg).some((e) => e.type === "mention" || e.type === "text_mention") || MENTION_RE.test(textOf(msg));
 }
 
+/** Kept for callers that only have the plain word list. */
 export function hitKeyword(text: string, keywords: string[]): string {
-  const low = text.toLowerCase();
-  for (const word of keywords) {
-    if (word && low.includes(word.toLowerCase())) return word;
-  }
-  return "";
+  return matchKeywords(text, keywords, [])?.label ?? "";
 }
 
 export function isForward(msg: TgMessage): boolean {
@@ -133,8 +130,14 @@ export function inspect(input: InspectInput): Verdict {
     }
   }
 
-  const word = hitKeyword(text, config.keywords);
-  if (word) return { hit: true, reason: `命中关键词「${word}」`, kind: "keyword" };
+  const word = matchKeywords(text, config.keywords, config.keywordPatterns ?? []);
+  if (word) {
+    return {
+      hit: true,
+      reason: word.via === "pattern" ? `命中正则 /${word.label}/` : `命中关键词「${word.label}」`,
+      kind: "keyword",
+    };
+  }
 
   for (const kind of kindsOf(msg)) {
     if (!config.locks.includes(kind)) continue;
