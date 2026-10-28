@@ -50,6 +50,12 @@ export type RuntimeCaches = {
   botId: number;
   /** the bot's admin rights per chat, for the console's rights badges. */
   botRights: LRUCache<number, { admin: boolean; delete: boolean; restrict: boolean; pin: boolean }>;
+  /** per-member message buffers, keyed `chatId:day`. */
+  memberStats: LRUCache<string, { day: string; counts: Map<number, number> }>;
+  /** last time each chat's member buffer was written. */
+  memberStatsFlushedAt: LRUCache<number, number>;
+  /** last roster touch per member, for the hourly throttle. */
+  memberTouch: LRUCache<string, number>;
 };
 
 const registry = new WeakMap<object, RuntimeCaches>();
@@ -78,6 +84,9 @@ export function cachesFor(key: object): RuntimeCaches {
     retentionBucket: 0,
     botId: 0,
     botRights: new LRUCache<number, { admin: boolean; delete: boolean; restrict: boolean; pin: boolean }>({ max: 2_000, ttl: 10 * 60_000 }),
+    memberStats: new LRUCache<string, { day: string; counts: Map<number, number> }>({ max: 2_000, ttl: 48 * 3_600_000 }),
+    memberStatsFlushedAt: new LRUCache<number, number>({ max: 5_000, ttl: 48 * 3_600_000 }),
+    memberTouch: new LRUCache<string, number>({ max: 20_000, ttl: 25 * 3_600_000 }),
   };
   registry.set(key, created);
   return created;

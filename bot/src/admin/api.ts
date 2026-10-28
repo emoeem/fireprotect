@@ -18,6 +18,8 @@
  * password may be short, so guessing must be expensive.
  */
 import type { Runtime } from "../context.ts";
+import { PERMS_MEMBER, PERMS_MUTED } from "../context.ts";
+import { record } from "../moderation.ts";
 import type { Env } from "../types.ts";
 import {
   banCount,
@@ -55,6 +57,9 @@ import {
   scheduleDelete,
   scheduleList,
   scheduleToggle,
+  warnList,
+  memberActivitySince,
+  memberList,
   userBlocks,
   userEventsAll,
   userWarnings,
@@ -66,6 +71,7 @@ import { dayKey } from "../ai/words.ts";
 import { cachesFor } from "../caches.ts";
 import { safeEqual } from "../telegram.ts";
 import { authorizeConsoleUser, verifyInitData } from "./tginit.ts";
+import { LOGIN_CODE_TTL_S, consumeLoginCode, issueLoginCode, loginCodeStatus, newLoginCode } from "./login-codes.ts";
 
 const COOKIE = "fw_admin";
 const SESSION_MS = 12 * 3600_000;
@@ -75,12 +81,20 @@ export const INIT_DATA_HEADER = "x-telegram-init-data";
 const LOGIN_FAIL_MAX = 8;
 const LOGIN_FAIL_WINDOW_S = 600;
 
+/** Login-code request and polling budgets per client address. */
+const LOGIN_REQUEST_WINDOW_MS = 10 * 60_000;
+const LOGIN_POLL_WINDOW_MS = 10 * 60_000;
+const LOGIN_POLL_MAX = 240;
+const loginRequests = new Map<string, number>();
+const loginPolls = new Map<string, { n: number; at: number }>();
+
 const enc = new TextEncoder();
 
 /**
  * Key material for the session cookie. `ADMIN_TOKEN` wins so existing sessions
  * survive this change; `ADMIN_PASSWORD` alone is enough for a password-only
- * deployment.
+ * deployment; with neither, the BOT_TOKEN derives one so the login-code flow
+ * (which needs no shared password at all) still has something to sign with.
  */
 function sessionSecret(env: Env): string {
   // `??` is not enough: wrangler `[vars]` and `.dev.vars` routinely define a key
@@ -88,7 +102,13 @@ function sessionSecret(env: Env): string {
   // and disable the console. Treat blank as absent.
   const token = String(env.ADMIN_TOKEN ?? "").trim();
   if (token) return token;
-  return String(env.ADMIN_PASSWORD ?? "").trim();
+  const password = String(env.ADMIN_PASSWORD ?? "").trim();
+  if (password) return password;
+  return `bot:${String(env.BOT_TOKEN ?? "")}`;
+}
+
+function hasPasswordSecret(env: Env): boolean {
+  return Boolean(String(env.ADMIN_TOKEN ?? "").trim() || String(env.ADMIN_PASSWORD ?? "").trim());
 }
 
 function envSecret(value: string | undefined): string {
@@ -107,18 +127,34 @@ async function sign(env: Env, expiry: string): Promise<string> {
   return [...sig].map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 32);
 }
 
-export async function mintSession(env: Env, nowMs: number): Promise<string> {
+export async function mintSession(env: Env, nowMs: number, userId?: number): Promise<string> {
   const expiry = String(nowMs + SESSION_MS);
-  return `${expiry}.${await sign(env, expiry)}`;
+  const uid = userId && userId > 0 ? String(userId) : "";
+  // v2 carries the user id so personal sessions can be authorized per chat and
+  // attributed per person; the bare-password cookie (v1, two segments) stays
+  // valid and keeps its operator status.
+  const payload = uid ? `${expiry}.${uid}` : expiry;
+  return `${payload}.${await sign(env, payload)}`;
 }
 
-export async function validSession(env: Env, cookie: string | null | undefined, nowMs: number): Promise<boolean> {
-  if (!sessionSecret(env)) return false;
-  if (!cookie) return false;
-  const [expiry, mac] = String(cookie).split(".");
-  if (!expiry || !mac) return false;
-  if (Number(expiry) < nowMs) return false;
-  return safeEqual(mac, await sign(env, expiry));
+export async function validSession(env: Env, cookie: string | null | undefined, nowMs: number): Promise<{ ok: boolean; userId?: number }> {
+  if (!sessionSecret(env)) return { ok: false };
+  if (!cookie) return { ok: false };
+  const parts = String(cookie).split(".");
+  if (parts.length === 2) {
+    const [expiry, mac] = parts as [string, string];
+    if (!expiry || !mac) return { ok: false };
+    if (Number(expiry) < nowMs) return { ok: false };
+    return { ok: safeEqual(mac, await sign(env, expiry)) };
+  }
+  if (parts.length === 3) {
+    const [expiry, uid, mac] = parts as [string, string, string];
+    if (!expiry || !mac) return { ok: false };
+    if (Number(expiry) < nowMs) return { ok: false };
+    if (!/^-?\d+$/.test(uid)) return { ok: false };
+    return { ok: safeEqual(mac, await sign(env, `${expiry}.${uid}`)), userId: Number(uid) };
+  }
+  return { ok: false };
 }
 
 /** The address the login budget is charged to. Cloudflare sets the first one. */
@@ -226,7 +262,8 @@ export type Identity = { ok: true; via: "cookie" | "telegram"; userId?: number }
  *
  * The Mini App path re-verifies on every request rather than trusting a cookie,
  * so a revoked admin loses the console at the next click instead of at the next
- * session expiry.
+ * session expiry. A cookie carrying a user id is a personal (login-code)
+ * session: per-chat authorized, never an operator.
  */
 async function identity(request: Request, env: Env, rt: Runtime): Promise<Identity> {
   const initData = request.headers.get(INIT_DATA_HEADER);
@@ -237,19 +274,20 @@ async function identity(request: Request, env: Env, rt: Runtime): Promise<Identi
     if (!allowed) return { ok: false, error: "这个 Telegram 账号不是本机器人的管理员" };
     return { ok: true, via: "telegram", userId: check.user.id };
   }
-  if (await validSession(env, readCookie(request, COOKIE), rt.now())) return { ok: true, via: "cookie" };
+  const session = await validSession(env, readCookie(request, COOKIE), rt.now());
+  if (session.ok) return { ok: true, via: "cookie", userId: session.userId };
   return { ok: false, error: "未登录" };
 }
 
 /**
- * Operators see everything: whoever holds the cookie (the shared secret) and
- * everyone in `ADMIN_IDS`. A Mini App user who is merely a group admin gets
- * exactly the groups they administer — one group's console must not open
+ * Operators see everything: whoever holds the bare password cookie and
+ * everyone in `ADMIN_IDS`. A personal session (login code or Mini App) gets
+ * exactly the groups its user administers — one group's console must not open
  * another group's config, blocks or schedules.
  */
 function isOperator(rt: Runtime, who: Identity): boolean {
   if (!who.ok) return false;
-  if (who.via === "cookie") return true;
+  if (who.via === "cookie") return !who.userId || rt.admin.isStatic(who.userId);
   return Boolean(who.userId && rt.admin.isStatic(who.userId));
 }
 
@@ -303,14 +341,47 @@ async function botRightsFor(rt: Runtime, botId: number, chatId: number): Promise
 export async function handleApi(request: Request, env: Env, rt: Runtime, url: URL): Promise<Response> {
   const path = url.pathname.replace(/\/+$/, "");
 
+  if (path === "/api/login/request" && request.method === "POST") {
+    // Per-IP throttle: three codes per ten minutes is plenty for one operator
+    // and keeps the code space from being pre-seeded by a stranger.
+    const ip = clientIp(request);
+    const last = loginRequests.get(ip);
+    if (last && rt.now() - last < LOGIN_REQUEST_WINDOW_MS) {
+      return json({ error: "请求太频繁，请几分钟后重试" }, 429, { "retry-after": "600" });
+    }
+    loginRequests.set(ip, rt.now());
+    if (loginRequests.size > 4_000) loginRequests.clear();
+    const code = newLoginCode();
+    await issueLoginCode(rt, code);
+    return json({ ok: true, code, bot: String(env.BOT_USERNAME ?? "").replace(/^@/, ""), ttl: LOGIN_CODE_TTL_S });
+  }
+
+  if (path === "/api/login/status" && request.method === "GET") {
+    const ip = clientIp(request);
+    const polled = loginPolls.get(ip) ?? { n: 0, at: rt.now() };
+    const window = rt.now() - polled.at > LOGIN_POLL_WINDOW_MS ? { n: 0, at: rt.now() } : polled;
+    window.n += 1;
+    loginPolls.set(ip, window);
+    if (loginPolls.size > 4_000) loginPolls.clear();
+    if (window.n > LOGIN_POLL_MAX) return json({ error: "轮询太频繁" }, 429);
+    const code = String(url.searchParams.get("code") ?? "");
+    if (!/^\d{6}$/.test(code)) return json({ error: "码格式不对" }, 400);
+    return json(await loginCodeStatus(rt, code));
+  }
+
   if (path === "/api/login" && request.method === "POST") {
-    if (!sessionSecret(env)) return json({ error: "部署没有设置 ADMIN_TOKEN 或 ADMIN_PASSWORD，后台已禁用" }, 503);
+    // The code path works with no password secret at all (BOT_TOKEN signs the
+    // session); the 503 only applies when there is genuinely nothing to sign with.
+    if (!sessionSecret(env) || (!hasPasswordSecret(env) && !env.BOT_TOKEN)) {
+      return json({ error: "部署没有设置 ADMIN_TOKEN 或 ADMIN_PASSWORD，后台已禁用" }, 503);
+    }
 
     const body = (await request.json().catch(() => ({}))) as {
       token?: string;
       password?: string;
       secret?: string;
       initData?: string;
+      code?: string;
     };
 
     // Mini App first: it is the only path that works inside an iframe, and it
@@ -322,6 +393,19 @@ export async function handleApi(request: Request, env: Env, rt: Runtime, url: UR
         return json({ error: "这个 Telegram 账号不是本机器人的管理员" }, 403);
       }
       return json({ ok: true, via: "telegram", user: check.user }, 200, { "set-cookie": cookieHeader(await mintSession(env, rt.now())) });
+    }
+
+    // Login code: the secret is the code itself, and it only works after an
+    // admin approved it from Telegram — so no rate budget is charged here.
+    const code = String(body.code ?? "").trim();
+    if (/^\d{6}$/.test(code)) {
+      const identity = await consumeLoginCode(rt, code);
+      if (!identity) return json({ error: "码不对、还没批准或已过期" }, 401);
+      return json(
+        { ok: true, via: "code", user: { id: identity.userId, first_name: identity.name } },
+        200,
+        { "set-cookie": cookieHeader(await mintSession(env, rt.now(), identity.userId)) },
+      );
     }
 
     const ip = clientIp(request);
@@ -430,6 +514,9 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
     const chatId = Number(chatMatch[1]);
     const rest = chatMatch[2] ?? "";
     if (!(await authorizeChat(rt, who, chatId))) return json({ error: "你不是这个群的管理员" }, 403);
+    // Personal sessions (login code / Mini App) attribute every write to the
+    // person; the shared-password cookie stays anonymous (0).
+    const actorId = who.ok && who.userId ? who.userId : 0;
 
     if (!rest) {
       const config = await rt.configFor(chatId);
@@ -521,6 +608,62 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       return json({ ok: true, applied });
     }
 
+    if (rest === "members" && request.method === "GET") {
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? 50) || 50, 200));
+      const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
+      const q = String(url.searchParams.get("q") ?? "").trim();
+      const day = dayKey(rt.now() - 7 * 86_400_000, rt.tzOffset);
+      const [rows, activity, warnRows, blocks] = await Promise.all([
+        memberList(rt.db, chatId, limit + 1, { offset, q }),
+        memberActivitySince(rt.db, chatId, day),
+        warnList(rt.db, chatId),
+        blockList(rt.db, chatId, 1_000),
+      ]);
+      const warnMap = new Map(warnRows.map((w) => [w.userId, w.count]));
+      const blockedSet = new Set(blocks.map((b) => b.userId));
+      return json({
+        members: rows.slice(0, limit).map((row) => ({
+          ...row,
+          week: activity.get(row.userId) ?? 0,
+          warnings: warnMap.get(row.userId) ?? 0,
+          blocked: blockedSet.has(row.userId),
+        })),
+        hasMore: rows.length > limit,
+        offset,
+      });
+    }
+
+    // Inline member actions from the console. They go through the same Bot API
+    // calls the group commands use, and fail loudly when the bot lacks rights.
+    const memberAction = rest.match(/^member\/(-?\d+)\/(mute|unmute|kick)$/);
+    if (memberAction && request.method === "POST") {
+      const userId = Number(memberAction[1]);
+      const action = memberAction[2];
+      let res;
+      if (action === "mute") {
+        res = await rt.api.call("restrictChatMember", {
+          chat_id: chatId,
+          user_id: userId,
+          permissions: PERMS_MUTED,
+          use_independent_chat_permissions: true,
+          until_date: Math.floor(rt.now() / 1000) + 3_600,
+        });
+      } else if (action === "unmute") {
+        res = await rt.api.call("restrictChatMember", {
+          chat_id: chatId,
+          user_id: userId,
+          permissions: PERMS_MEMBER,
+          use_independent_chat_permissions: true,
+        });
+      } else {
+        const banned = await rt.api.call("banChatMember", { chat_id: chatId, user_id: userId });
+        res = banned.ok ? await rt.api.call("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: true }) : banned;
+      }
+      if (!res.ok) return json({ error: res.error }, 502);
+      await record(rt, { chatId, userId, kind: action === "kick" ? "kick" : "mute", reason: `后台${action === "kick" ? "移出" : action === "mute" ? "禁言" : "解除禁言"}`, byId: actorId });
+      return json({ ok: true });
+    }
+
     // Dedicated config endpoints, keyed by feature. They exist so the console
     // cannot accidentally send a field it did not mean to touch: `patchKeys`
     // drops everything outside the list, and the shared zod schema still
@@ -557,7 +700,7 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       const name = decodeURIComponent(rest.slice(5)).toLowerCase().slice(0, 40);
       const body = (await request.json().catch(() => ({}))) as { content?: string };
       if (!name || !body.content) return json({ error: "名字和内容都不能为空" }, 400);
-      await noteSave(rt.db, { chatId, name, content: String(body.content).slice(0, 3500), createdBy: 0, at: rt.now() });
+      await noteSave(rt.db, { chatId, name, content: String(body.content).slice(0, 3500), createdBy: actorId, at: rt.now() });
       return json({ ok: true });
     }
     if (rest.startsWith("note/") && request.method === "DELETE") {
@@ -574,7 +717,7 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
         trigger: String(body.trigger).slice(0, 200),
         match: mode,
         response: String(body.response).slice(0, 1000),
-        createdBy: 0,
+        createdBy: actorId,
         at: rt.now(),
       });
       return json({ ok: true });
@@ -588,7 +731,7 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       const body = (await request.json().catch(() => ({}))) as { userId?: number; reason?: string };
       const userId = Number(body.userId);
       if (!Number.isFinite(userId) || userId === 0) return json({ error: "userId 不合法" }, 400);
-      await blockAdd(rt.db, { chatId, userId, reason: String(body.reason ?? "后台屏蔽"), byId: 0, at: rt.now() });
+      await blockAdd(rt.db, { chatId, userId, reason: String(body.reason ?? "后台屏蔽"), byId: actorId, at: rt.now() });
       return json({ ok: true });
     }
     if (rest.startsWith("block/") && request.method === "DELETE") {
@@ -621,7 +764,7 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       const body = (await request.json().catch(() => ({}))) as { text?: string; every?: number };
       if (!body.text) return json({ error: "内容不能为空" }, 400);
       const every = Math.max(0, Math.min(Number(body.every ?? 0) || 0, 30 * 86_400));
-      await scheduleAdd(rt.db, { chatId, text: String(body.text).slice(0, 3000), every, nextAt: rt.now() + 60_000, createdBy: 0 });
+      await scheduleAdd(rt.db, { chatId, text: String(body.text).slice(0, 3000), every, nextAt: rt.now() + 60_000, createdBy: actorId });
       return json({ ok: true });
     }
   }

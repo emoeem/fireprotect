@@ -13,10 +13,11 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { test } from "node:test";
 import { handleApi, mintSession, INIT_DATA_HEADER } from "../src/admin/api.ts";
+import { handleUpdate } from "../src/bot.ts";
 import { rememberChat } from "../src/db/repo.ts";
 import { menuButton } from "../src/menu.ts";
 import { parseInitData, verifyInitData, resetAdminCache } from "../src/admin/tginit.ts";
-import { makeRuntime } from "./harness.ts";
+import { makeRuntime, user } from "./harness.ts";
 
 const TOKEN = "123456:TEST-TOKEN";
 const PASSWORD = "emoemoemo";
@@ -198,9 +199,9 @@ test("a broken KV store cannot turn the login form into a 500", async () => {
   assert.equal(last.status, 429);
 });
 
-test("with neither secret configured the console refuses to log anyone in", async () => {
+test("with no secret at all the console refuses to log anyone in", async () => {
   const h = await makeRuntime();
-  const bare = { BOT_TOKEN: TOKEN } as never;
+  const bare = { BOT_TOKEN: "" } as never;
   const request = new Request("https://bot.test/api/login", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -332,6 +333,101 @@ test("global routes stay operator-only", async () => {
   assert.equal((await get(h, "/api/bans", headers)).status, 403);
   assert.equal((await get(h, "/api/preset", headers)).status, 403);
   assert.equal((await get(h, "/api/health", headers)).status, 403);
+});
+
+// ---------------------------------------------------------------------------
+// Login codes: request in the browser, approve from Telegram, consume once
+// ---------------------------------------------------------------------------
+
+async function requestCode(h: Awaited<ReturnType<typeof makeRuntime>>, ip = "203.0.113.10"): Promise<string> {
+  const res = await post(h, "/api/login/request", {}, { "cf-connecting-ip": ip });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.match(res.body.code, /^\d{6}$/);
+  return res.body.code as string;
+}
+
+test("a login code needs the Telegram side before the browser gets in", async () => {
+  const h = await makeRuntime();
+  const code = await requestCode(h);
+
+  const unapproved = await get(h, `/api/login/status?code=${code}`);
+  assert.equal(unapproved.body.approved, false);
+
+  // The browser cannot claim it before an admin approves.
+  const early = await post(h, "/api/login", { code });
+  assert.equal(early.status, 401);
+
+  // A non-admin cannot approve either (readOnly command → isAdmin gate).
+  await handleUpdate(h.rt, {
+    update_id: 900_001,
+    message: { message_id: 41, date: 1, chat: { id: -1001, type: "supergroup", title: "群" }, from: user(600), text: `/login ${code}` },
+  });
+  const still = await post(h, "/api/login", { code });
+  assert.equal(still.status, 401);
+
+  // The admin approves; the browser signs in and carries the user id.
+  await handleUpdate(h.rt, {
+    update_id: 900_002,
+    message: { message_id: 42, date: 1, chat: { id: -1001, type: "supergroup", title: "群" }, from: user(9001), text: `/login ${code}` },
+  });
+  const approved = await get(h, `/api/login/status?code=${code}`);
+  assert.equal(approved.body.approved, true);
+
+  const login = await post(h, "/api/login", { code });
+  assert.equal(login.status, 200);
+  assert.ok(login.cookie?.includes("fw_admin="));
+
+  // One-shot: the second consume fails.
+  const again = await post(h, "/api/login", { code });
+  assert.equal(again.status, 401);
+});
+
+test("a personal session from a code is per-chat authorized and attributed", async () => {
+  const h = await makeRuntime();
+  await rememberChat(h.rt.db, { chatId: -1001, title: "A 群", type: "supergroup", at: h.rt.now() });
+  await rememberChat(h.rt.db, { chatId: -1002, title: "B 群", type: "supergroup", at: h.rt.now() });
+  const code = await requestCode(h, "203.0.113.11");
+  // /login is an admin command: 5002 is not in ADMIN_IDS but administers
+  // -1001, so they can approve — and the personal session then covers exactly
+  // the chats they actually administer, never the whole deployment.
+  h.fake.on("getChatMember", (body) => ({
+    ok: true,
+    result: { status: body.chat_id === -1001 ? "administrator" : "member" },
+  }));
+  await handleUpdate(h.rt, {
+    update_id: 900_003,
+    message: { message_id: 43, date: 1, chat: { id: -1001, type: "supergroup", title: "群" }, from: user(5002), text: `/login ${code}` },
+  });
+  const login = await post(h, "/api/login", { code });
+  assert.equal(login.status, 200);
+  const cookie = login.cookie!.split(";")[0];
+
+  const who = await get(h, "/api/whoami", { cookie });
+  assert.equal(who.body.via, "cookie");
+  assert.equal(who.body.userId, 5002);
+
+  assert.equal((await get(h, "/api/chat/-1001", { cookie })).status, 200);
+  assert.equal((await get(h, "/api/chat/-1002", { cookie })).status, 403);
+  assert.equal((await get(h, "/api/bans", { cookie })).status, 403, "a personal session is not an operator");
+
+  // …and their writes are attributed to them.
+  await handleApi(
+    new Request("https://bot.test/api/chat/-1001/note/规则", { method: "PUT", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ content: "x" }) }),
+    ENV as never,
+    h.rt,
+    new URL("https://bot.test/api/chat/-1001/note/规则"),
+  );
+  const { noteList } = await import("../src/db/repo.ts");
+  const notes = await noteList(h.rt.db, -1001);
+  assert.equal(notes[0]?.createdBy, 5002);
+});
+
+test("the legacy two-segment cookie keeps operator status", async () => {
+  const h = await makeRuntime();
+  const cookie = `fw_admin=${await mintSession(ENV as never, h.rt.now())}`;
+  assert.equal((await get(h, "/api/bans", { cookie })).status, 200);
+  const who = await get(h, "/api/whoami", { cookie });
+  assert.equal(who.body.userId, null);
 });
 
 // ---------------------------------------------------------------------------

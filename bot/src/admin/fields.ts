@@ -101,13 +101,15 @@ export const FIELDS: FieldMeta[] = [
   {
     key: "captchaMode",
     label: "验证方式",
-    hint: "按钮被脚本秒过的概率最高；算术和问答能挡住自动化，但也更容易劝退真人。",
+    hint: "按钮最松，图形验证码和订阅频道最紧；问答/图形要求新人能打字（不预禁言）。",
     group: "captcha",
     kind: "select",
     options: [
       { value: "button", label: "点按钮" },
       { value: "math", label: "算术题" },
       { value: "question", label: "问答题" },
+      { value: "image", label: "图形验证码" },
+      { value: "subscribe", label: "订阅频道" },
     ],
   },
   {
@@ -138,6 +140,13 @@ export const FIELDS: FieldMeta[] = [
     hint: "多个答案用逗号分隔，每个都算对；不区分大小写。",
     group: "captcha",
     kind: "list",
+  },
+  {
+    key: "captchaChannel",
+    label: "订阅验证频道",
+    hint: "「订阅频道」方式要求新人加入这个公开频道；机器人需先加入该频道。",
+    group: "captcha",
+    kind: "text",
   },
   {
     key: "captchaPrompt",

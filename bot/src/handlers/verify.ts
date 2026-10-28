@@ -22,6 +22,7 @@ import {
   verifyCallback,
   type Challenge,
 } from "../captcha.ts";
+import { renderCaptchaPng } from "../captcha-image.ts";
 import { PERMS_MEMBER, PERMS_MUTED, type Runtime } from "../context.ts";
 import { record } from "../moderation.ts";
 import { escapeHtml } from "../telegram.ts";
@@ -30,6 +31,9 @@ import type { ChatConfig } from "../rules.ts";
 import type { TgChat, TgMessage, TgUser } from "../types.ts";
 
 const MAX_ATTEMPTS = 5;
+
+/** Modes whose answer is typed text — the member must stay unmuted to answer. */
+export const TYPED_MODES = new Set(["question", "image"]);
 
 export function verifySecret(rt: Runtime): string {
   return `verify:${rt.env.WEBHOOK_SECRET || rt.env.BOT_TOKEN || "dev"}`;
@@ -62,6 +66,9 @@ export async function issueChallenge(
   user: TgUser,
   config: ChatConfig,
 ): Promise<IssueResult> {
+  if (config.captchaMode === "subscribe" && !config.captchaChannel.trim()) {
+    return { error: "未设置 captchaChannel，订阅验证发不了", mode: "subscribe" };
+  }
   const challenge = challengeFor(config.captchaMode, {
     answers: config.captchaAnswer,
     question: config.captchaQuestion,
@@ -69,7 +76,9 @@ export async function issueChallenge(
     nowMs: rt.now(),
   });
 
-  const needsMute = challenge.mode !== "question";
+  // Typed answers need the keyboard: question/image members stay unmuted and
+  // every pre-answer message is deleted instead (see handleMessage).
+  const needsMute = !TYPED_MODES.has(challenge.mode);
   if (needsMute) {
     const muted = await rt.api.call("restrictChatMember", {
       chat_id: chat.id,
@@ -85,12 +94,30 @@ export async function issueChallenge(
 
   const name = escapeHtml(user.first_name || user.username || String(user.id));
   const prompt = config.captchaPrompt.split("{name}").join(name).split("{chat}").join(escapeHtml(chat.title ?? ""));
+  const minutes = Math.round(config.captchaTimeout / 60);
   const lines = [prompt];
   if (challenge.question) lines.push(`\n<b>${escapeHtml(challenge.question)}</b>`);
-  if (challenge.mode === "button") lines.push(`\n点下面的按钮，${Math.round(config.captchaTimeout / 60)} 分钟内有效。`);
-  if (challenge.mode === "question") lines.push(`\n直接回复答案，${Math.round(config.captchaTimeout / 60)} 分钟内有效。`);
+  if (challenge.mode === "button") lines.push(`\n点下面的按钮，${minutes} 分钟内有效。`);
+  if (challenge.mode === "question") lines.push(`\n直接回复答案，${minutes} 分钟内有效。`);
+  if (challenge.mode === "image") lines.push(`\n直接回复图片中的字符，${minutes} 分钟内有效。`);
+  if (challenge.mode === "subscribe" && config.captchaChannel.trim()) {
+    const channel = config.captchaChannel.trim().replace(/^@/, "");
+    lines.push(`\n先点「打开频道」加入 @${channel}，再点「我已订阅」完成验证。${minutes} 分钟内有效。`);
+  }
 
-  const markup = await buildMarkup(rt, chat.id, user.id, challenge);
+  // The image captcha ships as a photo: the code exists only in the pixels,
+  // so a script has to run OCR instead of reading the message.
+  if (challenge.mode === "image") {
+    const png = await renderCaptchaPng(challenge.answers?.[0] ?? "");
+    const sent = await rt.api.sendPhoto(chat.id, png, "captcha.png", { caption: lines.filter(Boolean).join("\n") });
+    if (!sent.ok) {
+      await rt.store.del(VERIFY_KEY(chat.id, user.id));
+      return { error: sent.error, mode: challenge.mode };
+    }
+    return { messageId: sent.result.message_id, mode: challenge.mode };
+  }
+
+  const markup = await buildMarkup(rt, chat.id, user.id, challenge, config);
   const sent = await say(rt, chat.id, lines.filter(Boolean).join("\n"), { markup, html: true });
 
   if (!sent.ok) {
@@ -109,11 +136,20 @@ export async function issueChallenge(
   return { messageId: sent.result.message_id, mode: challenge.mode };
 }
 
-async function buildMarkup(rt: Runtime, chatId: number, userId: number, challenge: Challenge): Promise<unknown> {
+async function buildMarkup(rt: Runtime, chatId: number, userId: number, challenge: Challenge, config: ChatConfig): Promise<unknown> {
   if (challenge.mode === "button") {
     return {
       inline_keyboard: [
         [{ text: "✅ 我不是机器人", callback_data: await signCallback(verifySecret(rt), chatId, userId, challenge.nonce) }],
+      ],
+    };
+  }
+  if (challenge.mode === "subscribe") {
+    const channel = config.captchaChannel.trim().replace(/^@/, "");
+    return {
+      inline_keyboard: [
+        [{ text: "📢 打开频道", url: `https://t.me/${channel}` }],
+        [{ text: "✅ 我已订阅", callback_data: await signCallback(verifySecret(rt), chatId, userId, challenge.nonce) }],
       ],
     };
   }
@@ -131,13 +167,13 @@ async function buildMarkup(rt: Runtime, chatId: number, userId: number, challeng
 
 export type VerifyOutcome = { ok: true } | { ok: false; attempts: number };
 
-/** Text answer, `question` mode only. Returns null when the member is not pending. */
+/** Text answer, `question`/`image` modes. Returns null when the member is not pending. */
 export async function answerChallenge(rt: Runtime, msg: TgMessage, config: ChatConfig): Promise<VerifyOutcome | null> {
   const user = msg.from;
   if (!user) return null;
   const challenge = await pendingChallenge(rt, msg.chat.id, user.id);
   if (!challenge) return null;
-  if (challenge.mode !== "question") return null;
+  if (!TYPED_MODES.has(challenge.mode)) return null;
 
   if (matchesAnswer(challenge, msg.text ?? "")) {
     await complete(rt, msg.chat, user, challenge, config);
@@ -191,6 +227,32 @@ export async function answerButton(
         Math.max(60, Math.floor((challenge.expiresAt - rt.now()) / 1000)),
       );
       return { status: "wrong", reason: `答案不对（第 ${challenge.attempts} 次）` };
+    }
+    await complete(rt, { id: chatId, type: "supergroup" }, user, challenge, config);
+    return { status: "ok", reason: "" };
+  }
+
+  if (challenge.mode === "subscribe") {
+    // The claim is checked against Telegram, not taken on faith: the tap only
+    // triggers a getChatMember on the configured channel.
+    const channel = config.captchaChannel.trim().replace(/^@/, "");
+    const res = await rt.api.call<{ status?: string }>("getChatMember", {
+      chat_id: `@${channel}`,
+      user_id: user.id,
+    });
+    const subscribed = res.ok && ["member", "administrator", "creator"].includes(res.result?.status ?? "");
+    if (!subscribed) {
+      challenge.attempts += 1;
+      if (challenge.attempts >= MAX_ATTEMPTS) {
+        await fail(rt, chatId, user, config, "订阅验证未通过");
+        return { status: "wrong", reason: "未订阅且次数用尽" };
+      }
+      await rt.store.put(
+        VERIFY_KEY(chatId, user.id),
+        JSON.stringify(challenge),
+        Math.max(60, Math.floor((challenge.expiresAt - rt.now()) / 1000)),
+      );
+      return { status: "wrong", reason: "还没有订阅该频道" };
     }
     await complete(rt, { id: chatId, type: "supergroup" }, user, challenge, config);
     return { status: "ok", reason: "" };

@@ -34,7 +34,7 @@ export type LockKind = (typeof LOCK_KINDS)[number];
 export const SPAM_ACTIONS = ["delete", "mute", "ban"] as const;
 export type SpamAction = (typeof SPAM_ACTIONS)[number];
 
-export const CAPTCHA_MODES = ["button", "math", "question"] as const;
+export const CAPTCHA_MODES = ["button", "math", "question", "image", "subscribe"] as const;
 export type CaptchaMode = (typeof CAPTCHA_MODES)[number];
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -62,6 +62,8 @@ export const configSchema = z.object({
   captchaQuestion: z.string().max(200).default("本群的主题是什么？（回复答案即可）"),
   captchaPrompt: z.string().max(300).default("{name}，先完成验证。通过之前不能发言。"),
   captchaTimeout: z.number().int().min(30).max(86_400).default(900),
+  /** `subscribe` mode: the public channel (@username) the member must join. */
+  captchaChannel: z.string().max(64).default(""),
   /** Remove from the group when the window closes instead of leaving them muted. */
   captchaKick: z.boolean().default(true),
 
@@ -154,10 +156,11 @@ export const DEFAULT_CONFIG: ChatConfig = configSchema.parse({});
 export const SETTABLE: Record<string, string> = {
   enabled: "on/off — 本群总开关（关=只答命令，不处置）",
   captcha: "on/off — 新人验证",
-  captchaMode: "button/math/question — 验证方式",
+  captchaMode: "button/math/question/image/subscribe — 验证方式",
   captchaTimeout: "秒，30–86400 — 验证时限",
   captchaPrompt: "文字，可用 {name} {chat}",
   captchaQuestion: "文字 — question 模式的问题",
+  captchaChannel: "@用户名 — subscribe 验证要求订阅的公开频道",
   captchaKick: "on/off — 超时移出群（off 只保持禁言）",
   welcome: "on/off — 欢迎语",
   welcomeText: "文字，可用 {name} {chat} {username} {id}",
@@ -324,7 +327,7 @@ export function parseKeywords(input: unknown, limit = 200): string[] {
 
 export function describeConfig(config: ChatConfig): string[] {
   const lines: string[] = [];
-  const mode = { button: "按钮", math: "算术", question: "问答题" }[config.captchaMode];
+  const mode = { button: "按钮", math: "算术", question: "问答题", image: "图形验证码", subscribe: "订阅频道" }[config.captchaMode];
   lines.push(
     config.captcha
       ? `新人验证：开（${mode}），${Math.round(config.captchaTimeout / 60)} 分钟内完成，超时${config.captchaKick ? "移出" : "保持禁言"}。`

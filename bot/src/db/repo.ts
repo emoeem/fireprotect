@@ -14,6 +14,8 @@ import {
   chats,
   events,
   externalHealth,
+  memberStats,
+  members,
   notes,
   replyFilters,
   rssFeeds,
@@ -148,6 +150,15 @@ export async function warnDec(db: Db, chatId: number, userId: number, at: number
 
 export async function warnReset(db: Db, chatId: number, userId: number): Promise<void> {
   await db.delete(warnings).where(and(eq(warnings.chatId, chatId), eq(warnings.userId, userId)));
+}
+
+/** Current warning rows for one chat — the member view's warning column. */
+export async function warnList(db: Db, chatId: number): Promise<{ userId: number; count: number }[]> {
+  const rows = (await db
+    .select({ userId: warnings.userId, count: warnings.count })
+    .from(warnings)
+    .where(eq(warnings.chatId, chatId))) as { userId: number; count: number }[];
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -989,4 +1000,90 @@ export function parseJobsPrune(db: Db, now: number, days = RETENTION_DAYS.parseJ
 
 export function toolUsagePrune(db: Db, now: number, days = RETENTION_DAYS.toolUsage): Promise<unknown> {
   return db.delete(toolUsage).where(lt(toolUsage.at, cutoffAt(now, days)));
+}
+
+// ---------------------------------------------------------------------------
+// Members: roster + per-member daily message counts.
+// ---------------------------------------------------------------------------
+
+export async function memberUpsert(
+  db: Db,
+  row: { chatId: number; userId: number; firstName: string; username: string; joinedAt: number; lastSeenAt: number },
+): Promise<void> {
+  await db
+    .insert(members)
+    .values(row)
+    .onConflictDoUpdate({
+      target: [members.chatId, members.userId],
+      // joinedAt survives: the first time we saw them join is the truth.
+      set: { firstName: row.firstName, username: row.username, lastSeenAt: row.lastSeenAt },
+    });
+}
+
+export async function memberStatsBump(db: Db, chatId: number, day: string, counts: [number, number][]): Promise<void> {
+  if (!counts.length) return;
+  const rows = counts.slice(0, 200).map(([userId, delta]) => ({ chatId, day, userId, messages: delta }));
+  await db
+    .insert(memberStats)
+    .values(rows)
+    .onConflictDoUpdate({
+      target: [memberStats.chatId, memberStats.day, memberStats.userId],
+      set: { messages: sql`${memberStats.messages} + excluded."messages"` },
+    });
+}
+
+export async function memberStatsPrune(db: Db, now: number, days = 180): Promise<unknown> {
+  return db.delete(memberStats).where(lt(memberStats.day, cutoffDay(now, days)));
+}
+
+export async function memberList(
+  db: Db,
+  chatId: number,
+  limit = 50,
+  options: { offset?: number; q?: string } = {},
+): Promise<{ userId: number; firstName: string; username: string; joinedAt: number; lastSeenAt: number }[]> {
+  const q = String(options.q ?? "").trim();
+  const where = q
+    ? and(
+        eq(members.chatId, chatId),
+        sql`(${members.firstName} like ${`%${q}%`} or ${members.username} like ${`%${q}%`} or cast(${members.userId} as text) like ${`%${q}%`})`,
+      )
+    : eq(members.chatId, chatId);
+  return (await db
+    .select({
+      userId: members.userId,
+      firstName: members.firstName,
+      username: members.username,
+      joinedAt: members.joinedAt,
+      lastSeenAt: members.lastSeenAt,
+    })
+    .from(members)
+    .where(where)
+    .orderBy(desc(members.lastSeenAt))
+    .limit(limit)
+    .offset(Math.max(0, options.offset ?? 0))) as { userId: number; firstName: string; username: string; joinedAt: number; lastSeenAt: number }[];
+}
+
+/** Messages per member since `day` (inclusive) — the 7-day activity column. */
+export async function memberActivitySince(db: Db, chatId: number, day: string): Promise<Map<number, number>> {
+  const rows = (await db
+    .select({ userId: memberStats.userId, n: sql<number>`sum(${memberStats.messages})` })
+    .from(memberStats)
+    .where(and(eq(memberStats.chatId, chatId), gte(memberStats.day, day)))
+    .groupBy(memberStats.userId)) as { userId: number; n: number }[];
+  return new Map(rows.map((row) => [row.userId, Number(row.n)]));
+}
+
+export async function memberTopDay(
+  db: Db,
+  chatId: number,
+  day: string,
+  limit = 10,
+): Promise<{ userId: number; messages: number }[]> {
+  return (await db
+    .select({ userId: memberStats.userId, messages: memberStats.messages })
+    .from(memberStats)
+    .where(and(eq(memberStats.chatId, chatId), eq(memberStats.day, day)))
+    .orderBy(desc(memberStats.messages))
+    .limit(limit)) as { userId: number; messages: number }[];
 }

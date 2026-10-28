@@ -289,3 +289,40 @@ export const parseJobs = sqliteTable(
 export type WordRowDb = typeof wordStats.$inferSelect;
 export type ParseJobRow = typeof parseJobs.$inferSelect;
 export type AiUsageRow = typeof aiUsage.$inferSelect;
+
+/**
+ * Group members the bot has seen, one row per (chat, member).
+ *
+ * `joinedAt` comes from the join event and survives updates; `lastSeenAt` is
+ * the throttle point for the member view. Names are the latest Telegram sent —
+ * cheap "改名监控": the row simply always holds the current name.
+ */
+export const members = sqliteTable(
+  "members",
+  {
+    chatId: integer("chat_id").notNull(),
+    userId: integer("user_id").notNull(),
+    firstName: text("first_name").notNull().default(""),
+    username: text("username").notNull().default(""),
+    joinedAt: integer("joined_at").notNull().default(0),
+    lastSeenAt: integer("last_seen_at").notNull().default(0),
+  },
+  (table) => [primaryKey({ columns: [table.chatId, table.userId] }), index("idx_members_chat_seen").on(table.chatId, table.lastSeenAt)],
+);
+
+/** Per-member daily message counts — the speaking leaderboard's only source. */
+export const memberStats = sqliteTable(
+  "member_stats",
+  {
+    chatId: integer("chat_id").notNull(),
+    day: text("day").notNull(),
+    userId: integer("user_id").notNull(),
+    messages: integer("messages").notNull().default(0),
+  },
+  (table) => [
+    primaryKey({ columns: [table.chatId, table.day, table.userId] }),
+    index("idx_mstats_chat_day").on(table.chatId, table.day),
+  ],
+);
+
+export type MemberRow = typeof members.$inferSelect;

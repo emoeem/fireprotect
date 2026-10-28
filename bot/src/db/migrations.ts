@@ -208,4 +208,27 @@ create index if not exists "idx_events_user" on "events" ("user_id","at");
 create index if not exists "idx_banned_at" on "banned_users" ("at");
 `.trim(),
   },
+  {
+    name: "0006_members",
+    sql: `
+create table if not exists "members" (
+  "chat_id" integer not null,
+  "user_id" integer not null,
+  "first_name" text not null default '',
+  "username" text not null default '',
+  "joined_at" integer not null default 0,
+  "last_seen_at" integer not null default 0,
+  primary key ("chat_id","user_id")
+);
+create index if not exists "idx_members_chat_seen" on "members" ("chat_id","last_seen_at");
+create table if not exists "member_stats" (
+  "chat_id" integer not null,
+  "day" text not null,
+  "user_id" integer not null,
+  "messages" integer not null default 0,
+  primary key ("chat_id","day","user_id")
+);
+create index if not exists "idx_mstats_chat_day" on "member_stats" ("chat_id","day");
+`.trim(),
+  },
 ];

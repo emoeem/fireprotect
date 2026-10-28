@@ -32,12 +32,14 @@ import {
 } from "../db/repo.ts";
 import { describeStrike, strikeAt } from "../ladder.ts";
 import { KIND_LABELS } from "../stats.ts";
+import { leaderboard, leaderboardText } from "../members.ts";
 import { block, listBlocked, unblock } from "../block.ts";
 import { helpCard, miniAppLink } from "../help.ts";
 import { statsText } from "../stats.ts";
 import { describeSync, normalizeChannel } from "../sync.ts";
 import { syncDelete, syncEnable, syncList, syncUpsert, toolStats } from "../db/repo.ts";
 import { MAX_PDF_BYTES, describePdfError, looksEncrypted, splitPdf } from "../tools/pdf.ts";
+import { approveLoginCode } from "../admin/login-codes.ts";
 import { resolveTelegramLink } from "../tools/expand.ts";
 import { convertTimestamp } from "../tools/timestamp.ts";
 import { TOOLS, TOOL_USAGE_LINE, allowTool } from "../tools/index.ts";
@@ -98,7 +100,9 @@ export const COMMAND_SPEC: CommandSpec[] = [
   { name: "get", public: true, usage: "名字", sample: "/get 不存在", invalid: "/get", boundary: "/get " + "名".repeat(200), invalidExpect: /用法|没有叫/ },
   { name: "notes", public: true, usage: "本群保存的说明", sample: "/notes", invalid: "/notes x", boundary: "/notes " + "x".repeat(200), invalidExpect: /还没有|条/ },
   { name: "stats", readOnly: true, usage: "[天数]", sample: "/stats", invalid: "/stats abc", boundary: "/stats 99999", invalidExpect: /最近 \d+ 天|没有记录/ },
+  { name: "login", readOnly: true, usage: "<6 位登录码>", sample: "/login 000000", invalid: "/login abc", boundary: "/login 999999999999", invalidExpect: /用法|码不对|已批准/ },
   { name: "actions", readOnly: true, usage: "[条数]", sample: "/actions", invalid: "/actions abc", boundary: "/actions 999", invalidExpect: /用法|最近/ },
+  { name: "top", readOnly: true, usage: "[人数]", sample: "/top", invalid: "/top abc", boundary: "/top 999", invalidExpect: /今日发言榜|还没有/ },
   { name: "warns", readOnly: true, usage: "<用户ID 或 回复消息>", sample: "/warns 500", invalid: "/warns abc", boundary: "/warns 999999999999", invalidExpect: /用法|没有找到/ },
 
   { name: "ban", right: "can_restrict_members", needsReply: true, mutates: true, usage: "[分钟]", sample: "/ban 10", invalid: "/ban abc", boundary: "/ban 999999", invalidExpect: /请回复|没指定对象|分钟数/ },
@@ -115,7 +119,7 @@ export const COMMAND_SPEC: CommandSpec[] = [
   { name: "lock", right: "can_restrict_members", mutates: true, usage: "[类型|all]", sample: "/lock", invalid: "/lock 不存在的类型", boundary: "/lock all", invalidExpect: /不认识的类型|全群/ },
   { name: "unlock", right: "can_restrict_members", mutates: true, usage: "[类型|all]", sample: "/unlock", invalid: "/unlock 不存在的类型", boundary: "/unlock all", invalidExpect: /不认识的类型|解除/ },
   { name: "set", right: "can_change_info", mutates: true, usage: "字段 值", sample: "/set maxLength 800", invalid: "/set 不存在的字段 1", boundary: "/set warnLimit 99999", invalidExpect: /未知字段|没成功/ },
-  { name: "captcha", right: "can_change_info", mutates: true, usage: "on|off|button|math|question", sample: "/captcha on", invalid: "/captcha 乱写", boundary: "/captcha question", invalidExpect: /用法|已/ },
+  { name: "captcha", right: "can_change_info", mutates: true, usage: "on|off|button|math|question|image|subscribe", sample: "/captcha on", invalid: "/captcha 乱写", boundary: "/captcha subscribe", invalidExpect: /用法|已|频道/ },
   { name: "keywords", right: "can_change_info", mutates: true, usage: "add 词1,词2 | del 词 | list", sample: "/keywords add 测试词", invalid: "/keywords 乱写", boundary: "/keywords add " + "词".repeat(120), invalidExpect: /用法|已加入|关键词/ },
   { name: "logs", right: "can_change_info", mutates: true, usage: "频道ID|off", sample: "/logs off", invalid: "/logs 不是数字", boundary: "/logs -100" + "9".repeat(20), invalidExpect: /请给频道|已关闭|记录/ },
   { name: "nightmode", right: "can_change_info", mutates: true, usage: "on|off [HH:MM-HH:MM]", sample: "/nightmode on", invalid: "/nightmode 25:99-99:99", boundary: "/nightmode 23:59-00:01", invalidExpect: /用法|夜间模式/ },
@@ -409,6 +413,10 @@ export async function handleCommand(input: CommandInput): Promise<boolean> {
       return cmdActions(input);
     case "warns":
       return cmdWarns(input);
+    case "top":
+      return cmdTop(input);
+    case "login":
+      return cmdLogin(input);
     default:
       return false;
   }
@@ -705,7 +713,7 @@ async function cmdCaptcha(input: CommandInput): Promise<boolean> {
   const { rt, msg, config } = input;
   const value = input.args.trim().toLowerCase();
   if (!value) {
-    await say(rt, msg.chat.id, `新人验证现在是 ${config.captcha ? "开" : "关"}（${config.captchaMode}）。用法：/captcha on|off|button|math|question`, {
+    await say(rt, msg.chat.id, `新人验证现在是 ${config.captcha ? "开" : "关"}（${config.captchaMode}）。用法：/captcha on|off|button|math|question|image|subscribe`, {
       replyTo: msg.message_id,
     });
     return true;
@@ -715,12 +723,16 @@ async function cmdCaptcha(input: CommandInput): Promise<boolean> {
     await say(rt, msg.chat.id, `新人验证已${saved.config.captcha ? "打开" : "关闭"}。`, { replyTo: msg.message_id });
     return true;
   }
-  if (["button", "math", "question"].includes(value)) {
+  if (["button", "math", "question", "image", "subscribe"].includes(value)) {
+    if (value === "subscribe" && !config.captchaChannel.trim()) {
+      await say(rt, msg.chat.id, "先用 /set captchaChannel @频道 设置要订阅的公开频道（机器人需已加入该频道）。", { replyTo: msg.message_id });
+      return true;
+    }
     const saved = await rt.saveConfig(msg.chat.id, { captcha: true, captchaMode: value });
     await say(rt, msg.chat.id, `验证方式已切换为 ${saved.config.captchaMode}。`, { replyTo: msg.message_id });
     return true;
   }
-  await say(rt, msg.chat.id, "用法：/captcha on|off|button|math|question", { replyTo: msg.message_id });
+  await say(rt, msg.chat.id, "用法：/captcha on|off|button|math|question|image|subscribe", { replyTo: msg.message_id });
   return true;
 }
 
@@ -1293,6 +1305,29 @@ async function cmdWarns(input: CommandInput): Promise<boolean> {
   if (!rows.length) return reply(input, `没有找到 ${userId} 的记录。`);
   const lines = rows.map((row) => `· ${stamp(rt, row.at)} ${eventLine(row)}`);
   return reply(input, [`用户 ${userId} 的最近 ${rows.length} 条记录：`, ...lines].join("\n"));
+}
+
+/**
+ * `/login <code>` — approve the web console's login code.
+ *
+ * The command is admin-gated (readOnly in the spec = isAdmin check), so an
+ * approved code means "a known admin vouched for that browser". The code itself
+ * stays one-shot: the browser consumes it on first login.
+ */
+async function cmdLogin(input: CommandInput): Promise<boolean> {
+  const { rt, msg } = input;
+  const code = input.args.trim();
+  if (!/^\d{6}$/.test(code)) return reply(input, "用法：/login 6 位数字码（网页后台登录页生成）。");
+  const approved = await approveLoginCode(rt, code, msg.from?.id ?? 0, msg.from?.first_name ?? "");
+  if (!approved) return reply(input, "码不对、已过期或已被批准过。请在网页上重新生成。");
+  return reply(input, "已批准。回到网页登录页，几秒内会自动进入后台。");
+}
+
+/** `/top [人数]` — today's speaking leaderboard; the same text `{{top}}` posts. */
+async function cmdTop(input: CommandInput): Promise<boolean> {
+  const { rt, msg } = input;
+  const limit = Math.max(3, Math.min(Number(input.args) || 10, 30));
+  return reply(input, leaderboardText(await leaderboard(rt, msg.chat.id, limit)));
 }
 
 /**

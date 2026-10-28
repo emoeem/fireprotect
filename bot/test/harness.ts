@@ -233,9 +233,11 @@ export function buttonData(fake: FakeTg): string {
   return String(sent?.body?.reply_markup?.inline_keyboard?.[0]?.[0]?.callback_data ?? "");
 }
 
-/** All callback payloads from the last keyboard sent (math mode has four). */
+/** All callback payloads from the last keyboard sent, across every row. */
 export function buttonDataAll(fake: FakeTg): string[] {
   const sent = fake.all("sendMessage").find((call) => call.body?.reply_markup);
-  const rows = sent?.body?.reply_markup?.inline_keyboard?.[0] ?? [];
-  return rows.map((button: { callback_data?: string }) => String(button.callback_data ?? ""));
+  const rows = sent?.body?.reply_markup?.inline_keyboard ?? [];
+  return rows.flatMap((row: { callback_data?: string }[]) =>
+    row.map((button) => String(button.callback_data ?? "")).filter(Boolean),
+  );
 }

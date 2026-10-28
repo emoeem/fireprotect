@@ -81,6 +81,8 @@ export const FULL_HELP = [
   "/captcha on|off｜/keywords add 词1,词2｜/logs 频道ID|off",
   "/nightmode on|off [23:00-07:00]｜/stats [天数]",
   "/actions [条数]｜/warns 用户ID（或回复）—— 审计：最近动作 / 某人的全部记录",
+  "/top [人数] —— 今日发言榜；定时消息里写 {{top}} 会在发送时替换为榜单",
+  "/login 6位码 —— 批准网页后台的登录码（登录页点「Telegram 登录码」生成）",
   "/save 名字 内容｜/delnote 名字｜/filter add exact|prefix|regex 触发词 => 回复",
   "/filters｜/delfilter ID｜/export｜/import <JSON>｜/trust（信任此人，免验证）",
   "/block /unblock /blocks —— 屏蔽后静默删除其所有消息（对方不知道）",

@@ -110,6 +110,16 @@ export class Telegram {
     return this.sendMedia("sendDocument", chatId, "document", { bytes, filename }, options);
   }
 
+  /** Upload a photo — the image captcha is the one caller today. */
+  async sendPhoto(
+    chatId: number,
+    bytes: Uint8Array,
+    filename: string,
+    options: { replyTo?: number; caption?: string } = {},
+  ): Promise<TgResult<{ message_id: number }>> {
+    return this.sendMedia("sendPhoto", chatId, "photo", { bytes, filename }, options);
+  }
+
   /**
    * `sendPhoto` / `sendVideo` / `sendDocument`, by URL or by upload.
    *

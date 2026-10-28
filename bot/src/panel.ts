@@ -55,10 +55,12 @@ export async function renderScreen(rt: Runtime, chatId: number, screen: string):
         text: [
           "<b>🤖 进群验证</b>",
           `状态：${config.captcha ? "开" : "关"}`,
-          `方式：${{ button: "按钮", math: "算术（4 个选项）", question: "问答题" }[config.captchaMode]}`,
+          `方式：${{ button: "按钮", math: "算术（4 个选项）", question: "问答题", image: "图形验证码", subscribe: "订阅频道" }[config.captchaMode]}`,
           `时限：${Math.round(config.captchaTimeout / 60)} 分钟，超时${config.captchaKick ? "移出群" : "保持禁言"}`,
+          config.captchaMode === "subscribe" ? `频道：@${config.captchaChannel.replace(/^@/, "") || "未设置"}` : "",
           "",
           "问答题的答案用 /set captchaAnswer 设置，题目用 /set captchaQuestion。",
+          "订阅频道用 /set captchaChannel @频道 设置（机器人需在频道里）。",
         ].join("\n"),
         markup: grid(
           [btn(config.captcha ? "关闭验证" : "打开验证", panelData(chatId, "set", "captcha"))],
@@ -66,6 +68,10 @@ export async function renderScreen(rt: Runtime, chatId: number, screen: string):
             btn(`按钮${config.captchaMode === "button" ? " ✓" : ""}`, panelData(chatId, "mode", "button")),
             btn(`算术${config.captchaMode === "math" ? " ✓" : ""}`, panelData(chatId, "mode", "math")),
             btn(`问答${config.captchaMode === "question" ? " ✓" : ""}`, panelData(chatId, "mode", "question")),
+          ],
+          [
+            btn(`图形${config.captchaMode === "image" ? " ✓" : ""}`, panelData(chatId, "mode", "image")),
+            btn(`订阅${config.captchaMode === "subscribe" ? " ✓" : ""}`, panelData(chatId, "mode", "subscribe")),
           ],
           [btn(`超时${config.captchaKick ? "移出" : "只禁言"}（点击切换）`, panelData(chatId, "set", "captchaKick"))],
           [back],

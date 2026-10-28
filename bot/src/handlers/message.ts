@@ -23,12 +23,13 @@ import { visionSubject } from "../ai/vision.ts";
 import { bumpWords } from "../ai/words.ts";
 import { allowParse, enqueueParse, runParseJob } from "../parse/service.ts";
 import { firstSupported } from "../parse/sites.ts";
+import { bumpMemberStat, touchMember } from "../members.ts";
 import { inNightWindow } from "../nightmode.ts";
 import { deleteMessages, muteFor, punishAuto, record, say } from "../moderation.ts";
 import { blocked } from "../block.ts";
 import { filterList, isTrusted, rememberChat } from "../db/repo.ts";
 import { handleCommand } from "./commands.ts";
-import { answerChallenge, pendingChallenge } from "./verify.ts";
+import { TYPED_MODES, answerChallenge, pendingChallenge } from "./verify.ts";
 import type { FilterRow } from "../db/schema.ts";
 import type { TgMessage } from "../types.ts";
 
@@ -91,9 +92,10 @@ export async function handleMessage(rt: Runtime, msg: TgMessage): Promise<void> 
   // back on) but stops every automatic action.
   if (!config.enabled) return;
 
-  // 2. a pending free-text answer is not spam
+  // 2. a pending free-text answer is not spam (question and image modes both
+  //    answer by typing — see verify.ts TYPED_MODES)
   const pending = await pendingChallenge(rt, chatId, from.id);
-  if (pending && pending.mode === "question") {
+  if (pending && TYPED_MODES.has(pending.mode)) {
     const outcome = await answerChallenge(rt, msg, config);
     await deleteMessages(rt, chatId, [msg.message_id]);
     if (outcome && !outcome.ok) {
@@ -167,6 +169,10 @@ export async function handleMessage(rt: Runtime, msg: TgMessage): Promise<void> 
 
   // 5c. hot words: counting only, never a moderation decision.
   if (config.hotWords && text) await bumpWords(rt, chatId, text);
+
+  // 5e. roster + per-member message counter (batched; never a moderation input).
+  void touchMember(rt, chatId, from);
+  void bumpMemberStat(rt, chatId, from.id);
 
   // 5d. optional auto-parse. Off by default because it costs a request per link
   // and most groups would rather choose when to spend it. Failure is silent by

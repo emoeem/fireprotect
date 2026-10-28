@@ -123,7 +123,7 @@ test("login with the right token returns a hardened cookie", async () => {
   assert.match(cookie, /SameSite=Strict/);
 });
 
-test("the API is disabled entirely when ADMIN_TOKEN is unset", async () => {
+test("with no password secret the password path is closed but login codes still work", async () => {
   const h = await makeRuntime();
   const res = await handleApi(
     req("/api/login", { method: "POST", body: JSON.stringify({ token: "" }) }),
@@ -131,7 +131,18 @@ test("the API is disabled entirely when ADMIN_TOKEN is unset", async () => {
     h.rt,
     new URL("https://bot.example/api/login"),
   );
-  assert.equal(res.status, 503);
+  // The password has nothing to compare against, so guessing is always wrong.
+  assert.equal(res.status, 401);
+  // The BOT_TOKEN-signed session means the code flow remains a way in.
+  const request = await handleApi(
+    req("/api/login/request", { method: "POST", body: "{}" }),
+    { BOT_TOKEN: "123:abc" } as never,
+    h.rt,
+    new URL("https://bot.example/api/login/request"),
+  );
+  assert.equal(request.status, 200);
+  const body = (await request.json()) as { code: string };
+  assert.match(body.code, /^\d{6}$/);
 });
 
 test("an authenticated session can read and patch a chat", async () => {

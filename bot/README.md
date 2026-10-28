@@ -70,7 +70,7 @@ npm test && npm run typecheck && npm run lint  # 145 测试
 | `/lock` `/unlock` | 不带参数＝全群禁言/解除 | 封禁用户 |
 | `/lock links photos …` / `/lock all` | 按消息类型拦截 | 封禁用户 |
 | `/set 字段 值` | 改规则，`/set strikes off` 关阶梯 | 修改群信息 |
-| `/captcha on\|off\|button\|math\|question` | 验证方式 | 修改群信息 |
+| `/captcha on\|off\|button\|math\|question\|image\|subscribe` | 验证方式（图形验证码 / 订阅频道，频道用 `/set captchaChannel` 设） | 修改群信息 |
 | `/keywords add 词1,词2` `/keywords del 词` | 关键词 | 修改群信息 |
 | `/nightmode on\|off [23:00-07:00]` | 夜间只允许管理员发言 | 修改群信息 |
 | `/logs 频道ID\|off` | 处置记录发到哪 | 修改群信息 |
@@ -80,6 +80,8 @@ npm test && npm run typecheck && npm run lint  # 145 测试
 | `/export` `/import <JSON>` | 规则模板复制到别的群 | 修改群信息 |
 | `/stats [天数]` `/rules` | 统计与当前配置 | 管理员 |
 | `/actions [条数]` `/warns <ID>` | 审计：最近动作（含操作人）/ 某位成员的全部记录 | 管理员 |
+| `/top [人数]` | 今日发言榜；定时消息里写 `{{top}}` 发送时替换为榜单 | 管理员 |
+| `/login <6位码>` | 批准网页后台登录码（登录页「Telegram 登录码」生成），个人会话按群鉴权、写操作归因 | 管理员 |
 | `/block` `/unblock` `/blocks` | 屏蔽成员：静默删除其全部消息，不提示、不计警告 | 封禁用户 |
 | `/sync add <@频道> [秒\|instant]` `/sync list\|on\|off\|del` | 频道新帖同步到本群；失效自动停用并告警 | 修改群信息 |
 | `/sub <feed 地址>` `/sub list` `/sub export` `/unsub #ID` `/unsubthis` | RSS 订阅，按群隔离；连续 5 次抓不到自动退订并告警；导出 OPML | 修改群信息 |

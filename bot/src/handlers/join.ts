@@ -8,6 +8,7 @@ import { PERMS_MUTED, type Runtime } from "../context.ts";
 import { trackJoin } from "../flood.ts";
 import { ban, logAction, record, recordBan, say } from "../moderation.ts";
 import { escapeHtml } from "../telegram.ts";
+import { touchMember } from "../members.ts";
 import { rememberChat } from "../db/repo.ts";
 import { issueChallenge } from "./verify.ts";
 import { forgetJoin, rememberJoin } from "./message.ts";
@@ -41,6 +42,8 @@ async function welcomeOne(rt: Runtime, chatId: number, member: TgUser, config: C
   rememberJoin(rt, chatId, member.id);
   await rt.store.put(`join:${chatId}:${member.id}`, String(rt.now()), Math.max(3600, config.newbieHours * 3600 + 600));
   await record(rt, { chatId, userId: member.id, kind: "join", reason: "进群" });
+  // The roster learns the member here: this is the one moment joinedAt is true.
+  void touchMember(rt, chatId, member, rt.now());
 
   // External lists run before the challenge: a known spammer should not get a
   // button, and banning now saves the group a spam message.

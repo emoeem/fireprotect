@@ -10,8 +10,9 @@
  */
 import type { Runtime } from "./context.ts";
 import { cachesFor } from "./caches.ts";
-import { aiUsagePrune, eventsPrune, parseJobsPrune, toolUsagePrune, wordStatsPrune } from "./db/repo.ts";
+import { aiUsagePrune, eventsPrune, parseJobsPrune, toolUsagePrune, wordStatsPrune, memberStatsPrune } from "./db/repo.ts";
 import { scheduleDue, scheduleMarkSent } from "./db/repo.ts";
+import { leaderboard, leaderboardText } from "./members.ts";
 import { notifyOperators } from "./notify.ts";
 import { say } from "./moderation.ts";
 import { escapeHtml } from "./telegram.ts";
@@ -28,7 +29,12 @@ export async function runScheduled(rt: Runtime, limit = 10): Promise<{ sent: num
   let disabled = 0;
 
   for (const row of due) {
-    const res = await say(rt, row.chatId, row.text, { html: true });
+    // `{{top}}` in a scheduled message is a placeholder, not literal text: it
+    // turns any daily slot into "post the leaderboard" without a new feature.
+    const text = row.text.includes("{{top}}")
+      ? row.text.split("{{top}}").join(leaderboardText(await leaderboard(rt, row.chatId, 10)))
+      : row.text;
+    const res = await say(rt, row.chatId, text, { html: true });
     if (res.ok) {
       sent += 1;
       await scheduleMarkSent(rt.db, row.id, row.every > 0 ? rt.now() + row.every * 1000 : null);
@@ -72,6 +78,7 @@ export async function runRetention(rt: Runtime): Promise<{ pruned: boolean; fail
     ["ai_usage", () => aiUsagePrune(rt.db, now)],
     ["parse_jobs", () => parseJobsPrune(rt.db, now)],
     ["tool_usage", () => toolUsagePrune(rt.db, now)],
+    ["member_stats", () => memberStatsPrune(rt.db, now)],
   ];
   const failed: string[] = [];
   for (const [name, job] of jobs) {

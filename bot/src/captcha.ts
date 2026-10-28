@@ -13,6 +13,7 @@
  * TTL — a callback for an expired window fails even if the signature is valid.
  */
 import type { CaptchaMode } from "./rules.ts";
+import { captchaCode } from "./captcha-image.ts";
 
 export type Challenge = {
   mode: CaptchaMode;
@@ -105,8 +106,7 @@ export function mathChallenge(random: () => number = Math.random): {
   question: string;
   answers: string[];
   options: number[];
-} {
-  const a = 2 + Math.floor(random() * 8);
+} {  const a = 2 + Math.floor(random() * 8);
   const b = 2 + Math.floor(random() * 8);
   const plus = random() < 0.5;
   const [hi, lo] = a >= b ? [a, b] : [b, a];
@@ -152,9 +152,15 @@ export function challengeFor(
     attempts: 0,
   };
   if (mode === "button") return base;
+  if (mode === "subscribe") return base;
   if (mode === "math") {
     const math = mathChallenge(options.random);
     return { ...base, question: math.question, answers: math.answers, options: math.options };
+  }
+  if (mode === "image") {
+    // The code lives only in the challenge (server-side KV) and in the PNG.
+    const code = captchaCode(options.random);
+    return { ...base, question: "请输入图片中的 5 位字符", answers: [code] };
   }
   return {
     ...base,

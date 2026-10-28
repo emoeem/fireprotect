@@ -182,14 +182,38 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
         .then(function(){ boot(); })
         .catch(function(e){ err.textContent = e.message; btn.disabled = false; });
     }}, ['登录']);
+
+    // Login-code flow: no shared password needed. The admin approves the code
+    // from Telegram (/login <code>), the browser polls and signs itself in.
+    var codeBox = el('div', {class:'muted', style:'margin-top:14px'});
+    var codeBtn = el('button', {onclick:function(){
+      codeBtn.disabled = true; codeBox.textContent = '生成中…';
+      api('/api/login/request', {method:'POST'}).then(function(res){
+        codeBox.innerHTML = '';
+        codeBox.appendChild(el('div', null, ['登录码：' + res.code + '（10 分钟内有效）']));
+        codeBox.appendChild(el('div', null, ['在群里把它发给机器人：/login ' + res.code]));
+        var timer = setInterval(function(){
+          api('/api/login/status?code=' + res.code).then(function(st){
+            if (!st.approved) return;
+            clearInterval(timer);
+            codeBox.textContent = '已批准，正在进入…';
+            api('/api/login', {method:'POST', body:{code: res.code}}).then(function(){ boot(); })
+              .catch(function(e){ err.textContent = e.message; });
+          }).catch(function(){ clearInterval(timer); codeBox.textContent = '轮询失败，请刷新重试。'; });
+        }, 2500);
+      }).catch(function(e){ codeBox.textContent = e.message; codeBtn.disabled = false; });
+    }}, ['用 Telegram 登录码登录']);
+
     var hint = TG_INIT
       ? 'Mini App 身份校验失败——请回 Telegram 重新打开，或用密码登录。'
-      : '输入部署时设置的访问密码（ADMIN_PASSWORD）。';
+      : '输入部署时设置的访问密码（ADMIN_PASSWORD），或用下面的 Telegram 登录码。';
     var box = el('div', {class:'login', id:'loginbox'}, [
       el('h1', null, ['焰卫 · 后台']),
       el('div', {class:'muted'}, [hint]),
       el('div', {style:'height:10px'}),
-      input, el('div', {style:'height:10px'}), btn, err
+      input, el('div', {style:'height:10px'}), btn,
+      el('div', {style:'height:6px'}),
+      codeBtn, codeBox, err
     ]);
     root.appendChild(box);
     input.addEventListener('keydown', function(e){ if(e.key === 'Enter') btn.click(); });
@@ -279,6 +303,69 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     return api('/api/chat/' + state.chat.chatId).then(function(data){ state.chat = data; renderMain(); }).catch(function(e){ toast(e.message); });
   }
 
+  // The member view: roster + activity + warnings + inline actions. Data comes
+  // from its own endpoint because it pages independently of the chat bundle.
+  var memberState = { q: '', offset: 0, hasMore: false, pageSize: 50 };
+  function renderMembers(){
+    var main = document.getElementById('main');
+    clear(main);
+    var card = el('div', {class:'card'});
+    card.appendChild(el('h2', null, ['成员']));
+    var search = el('input', {type:'search', placeholder:'搜索昵称 / 用户名 / ID', value:memberState.q});
+    var doSearch = function(){ memberState.q = search.value.trim(); loadMembers(0); };
+    search.addEventListener('keydown', function(e){ if(e.key === 'Enter') doSearch(); });
+    card.appendChild(el('div', {class:'row', style:'margin-bottom:8px'}, [search, el('button', {class:'small', onclick:doSearch}, ['搜索'])]));
+    card.appendChild(el('div', {id:'member-rows'}, [el('div', {class:'muted'}, ['加载中…'])]));
+    if (memberState.offset > 0 || memberState.hasMore) {
+      var nav = el('div', {class:'row', id:'member-nav', style:'margin-top:8px'});
+      card.appendChild(nav);
+    }
+    main.appendChild(card);
+    loadMembers(memberState.offset);
+  }
+
+  function memberAction(userId, action, label){
+    var btn = el('button', {class:'small' + (action === 'kick' ? ' danger' : ''), onclick:function(){
+      btn.disabled = true;
+      api('/api/chat/' + state.chat.chatId + '/member/' + userId + '/' + action, {method:'POST'})
+        .then(function(){ toast('已' + label); loadMembers(memberState.offset); })
+        .catch(function(e){ toast(e.message); btn.disabled = false; });
+    }}, [label]);
+    return btn;
+  }
+
+  function loadMembers(offset){
+    var params = new URLSearchParams({ offset: String(offset || 0), limit: String(memberState.pageSize) });
+    if (memberState.q) params.set('q', memberState.q);
+    api('/api/chat/' + state.chat.chatId + '/members?' + params.toString()).then(function(res){
+      memberState.offset = res.offset || 0;
+      memberState.hasMore = Boolean(res.hasMore);
+      var box = document.getElementById('member-rows');
+      if (!box) return;
+      clear(box);
+      var table = el('table', null, [el('tr', null, [el('th',null,['成员']), el('th',null,['7 天发言']), el('th',null,['警告']), el('th',null,['入群']), el('th',null,['最近发言']), el('th',null,['操作'])])]);
+      (res.members||[]).forEach(function(m){
+        var name = m.firstName || (m.username ? '@' + m.username : String(m.userId));
+        table.appendChild(el('tr', null, [
+          el('td', null, [el('b', null, [name]), el('span', {class:'muted', style:'margin-left:6px'}, [String(m.userId)]), m.blocked ? el('span', {class:'pill bad', style:'margin-left:6px'}, ['已屏蔽']) : null]),
+          el('td', null, [String(m.week)]),
+          el('td', null, [m.warnings > 0 ? String(m.warnings) : '-']),
+          el('td', null, [m.joinedAt ? new Date(m.joinedAt).toLocaleDateString() : '-']),
+          el('td', null, [m.lastSeenAt ? new Date(m.lastSeenAt).toLocaleDateString() : '-']),
+          el('td', null, [memberAction(m.userId, 'mute', '禁言'), ' ', memberAction(m.userId, 'unmute', '解除'), ' ', memberAction(m.userId, 'kick', '移出')])
+        ]));
+      });
+      if (!(res.members||[]).length) table.appendChild(el('tr', null, [el('td', {class:'muted'}, ['还没有成员记录（成员在发言或进群后出现）']), el('td',null,['']), el('td',null,['']), el('td',null,['']), el('td',null,['']), el('td',null,[''])]));
+      box.appendChild(table);
+      var nav = document.getElementById('member-nav');
+      if (nav) {
+        clear(nav);
+        if (memberState.offset > 0) nav.appendChild(el('button', {class:'small', onclick:function(){ loadMembers(Math.max(0, memberState.offset - memberState.pageSize)); }}, ['← 上一页']));
+        if (memberState.hasMore) nav.appendChild(el('button', {class:'small', onclick:function(){ loadMembers(memberState.offset + memberState.pageSize); }}, ['下一页 →']));
+      }
+    }).catch(function(e){ toast(e.message); });
+  }
+
   // One page of the event log. The endpoint returns hasMore by fetching one
   // row past the limit, so paging needs no separate count query.
   function loadEvents(chatId, offset, kind){
@@ -288,6 +375,122 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
       state.log = { chatId: chatId, offset: res.offset, kind: kind, hasMore: Boolean(res.hasMore), events: res.events || [] };
       if (state.tab === 'stats') renderMain();
     }).catch(function(e){ toast(e.message); });
+  }
+
+  // The protection table: every guard the bot enforces, one row each, with a
+  // status toggle and an inline editor — the shape worth copying from the
+  // reference console. Rows read and write plain config fields, so saving goes
+  // through the same validated PATCH as every other form here.
+  var LOCK_LABELS = {links:'链接',photos:'图片',videos:'视频',stickers:'贴纸',gifs:'动图',files:'文件',polls:'投票',voice:'语音',forwards:'转发',invites:'邀请链接',mentions:'@提及',bots:'机器人',channels:'频道'};
+  var protectEditKey = '';
+  function protectRow(name, desc, on, togglePatch, editor){
+    var cfg = state.chat.config;
+    var row = el('div', {class:'row', style:'border-bottom:1px solid #1f2a37;padding:8px 0;align-items:center'}, [
+      el('b', {style:'width:150px'}, [name]),
+      el('span', {class:'muted', style:'flex:1'}, [desc]),
+      el('button', {class:'small' + (on ? '' : ' danger'), onclick:function(){
+        api('/api/chat/' + state.chat.chatId + '/config', {method:'PATCH', body: togglePatch(cfg)}).then(function(res){
+          state.chat.config = res.config; renderProtect();
+        }).catch(function(e){ toast(e.message); });
+      }}, [on ? '已启用' : '已停用'])
+    ]);
+    if (editor) {
+      row.appendChild(el('button', {class:'small', style:'margin-left:8px', onclick:function(){
+        protectEditKey = protectEditKey === name ? '' : name; renderProtect();
+      }}, ['编辑']));
+      if (protectEditKey === name) {
+        var wrap = el('div', {class:'row', style:'padding:6px 0 10px 150px;flex-wrap:wrap'});
+        editor(wrap, function(patch){
+          api('/api/chat/' + state.chat.chatId + '/config', {method:'PATCH', body: patch}).then(function(res){
+            state.chat.config = res.config; toast('已保存'); renderProtect();
+          }).catch(function(e){ toast(e.message); });
+        });
+        row.appendChild(wrap);
+      }
+    }
+    return row;
+  }
+
+  function numInput(value, min, max){
+    return el('input', {type:'number', value:String(value), min:String(min), max:String(max), style:'width:90px'});
+  }
+
+  function renderProtect(){
+    var cfg = state.chat.config;
+    var card = el('div', {class:'card'});
+    card.appendChild(el('h2', null, ['防护开关']));
+    card.appendChild(el('div', {class:'muted', style:'margin-bottom:8px'}, ['每一行是一道独立防线；开关立即生效。处置动作（删除/禁言）在「规则」页统一设置。']));
+
+    (state.overview.lockKinds || []).forEach(function(kind){
+      card.appendChild(protectRow('禁止' + (LOCK_LABELS[kind] || kind), '删除包含' + (LOCK_LABELS[kind] || kind) + '的消息', cfg.locks.indexOf(kind) >= 0, function(c){
+        var next = c.locks.indexOf(kind) >= 0 ? c.locks.filter(function(k){ return k !== kind; }) : c.locks.concat([kind]);
+        return { locks: next };
+      }));
+    });
+
+    card.appendChild(protectRow('超长内容', '超过字数上限的消息删除（0 = 关）', cfg.maxLength > 0, function(c){ return { maxLength: c.maxLength > 0 ? 0 : 1200 }; }, function(wrap, save){
+      var input = numInput(cfg.maxLength, 0, 4000);
+      wrap.appendChild(input);
+      wrap.appendChild(el('button', {class:'small primary', onclick:function(){ save({ maxLength: Number(input.value) }); }}, ['保存']));
+    }));
+
+    card.appendChild(protectRow('违禁词', cfg.keywords.length + ' 个词，' + (cfg.keywordPatterns||[]).length + ' 条正则', cfg.keywords.length > 0 || (cfg.keywordPatterns||[]).length > 0, function(c){
+      return { keywords: c.keywords.length ? [] : ['加微信', '代理', '博彩', '日赚', '兼职刷单'] };
+    }, function(wrap){
+      wrap.appendChild(el('span', {class:'muted'}, ['词条在「规则」页维护，这里只做总开关。']));
+    }));
+
+    card.appendChild(protectRow('夜间模式', cfg.nightStart + '–' + cfg.nightEnd + ' 只许管理员发言', Boolean(cfg.nightMode), function(c){ return { nightMode: !c.nightMode }; }, function(wrap, save){
+      var s = el('input', {value:cfg.nightStart, style:'width:90px'});
+      var e = el('input', {value:cfg.nightEnd, style:'width:90px'});
+      wrap.appendChild(s); wrap.appendChild(e);
+      wrap.appendChild(el('button', {class:'small primary', onclick:function(){ save({ nightStart: s.value, nightEnd: e.value }); }}, ['保存']));
+    }));
+
+    card.appendChild(protectRow('防刷屏', cfg.floodLimit > 0 ? cfg.floodLimit + ' 条 / ' + cfg.floodWindow + ' 秒' : '关', cfg.floodLimit > 0, function(c){ return { floodLimit: c.floodLimit > 0 ? 0 : 5 }; }, function(wrap, save){
+      var limit = numInput(cfg.floodLimit || 5, 1, 60);
+      var window_ = numInput(cfg.floodWindow, 3, 3600);
+      wrap.appendChild(limit); wrap.appendChild(window_);
+      wrap.appendChild(el('button', {class:'small primary', onclick:function(){ save({ floodLimit: Number(limit.value), floodWindow: Number(window_.value) }); }}, ['保存']));
+    }));
+
+    card.appendChild(protectRow('防炸群', cfg.joinRateMax > 0 ? cfg.joinRateMax + ' 人 / ' + cfg.joinRateWindow + ' 秒，触发' + (cfg.joinRateAction === 'lock' ? '锁群' : '提醒') : '关', cfg.joinRateMax > 0, function(c){ return { joinRateMax: c.joinRateMax > 0 ? 0 : 12 }; }, function(wrap, save){
+      var max = numInput(cfg.joinRateMax || 12, 1, 200);
+      var win = numInput(cfg.joinRateWindow, 5, 600);
+      var act = el('select', null, [el('option',{value:'notify'},['仅提醒']), el('option',{value:'lock'},['自动锁群'])]);
+      act.value = cfg.joinRateAction;
+      wrap.appendChild(max); wrap.appendChild(win); wrap.appendChild(act);
+      wrap.appendChild(el('button', {class:'small primary', onclick:function(){ save({ joinRateMax: Number(max.value), joinRateWindow: Number(win.value), joinRateAction: act.value }); }}, ['保存']));
+    }));
+
+    card.appendChild(protectRow('新人限制', '入群 ' + cfg.newbieHours + ' 小时内禁' + (cfg.newbieBlocks||[]).join('、'), cfg.newbieHours > 0, function(c){ return { newbieHours: c.newbieHours > 0 ? 0 : 24 }; }, function(wrap, save){
+      var hours = numInput(cfg.newbieHours, 0, 720);
+      wrap.appendChild(hours);
+      wrap.appendChild(el('button', {class:'small primary', onclick:function(){ save({ newbieHours: Number(hours.value) }); }}, ['保存']));
+    }));
+
+    card.appendChild(protectRow('AI 图片审核', cfg.ai ? cfg.aiProvider + '，阈值 ' + cfg.aiMinScore : '关（需部署 VISION_KEY）', Boolean(cfg.ai), function(c){ return { ai: !c.ai }; }, function(wrap){
+      wrap.appendChild(el('span', {class:'muted'}, ['阈值与预算在「AI 审核」页调。']));
+    }));
+
+    card.appendChild(protectRow('自动解析链接', cfg.parseAuto ? '每小时至多 ' + cfg.parsePerHour + ' 条' : '关', Boolean(cfg.parseAuto), function(c){ return { parseAuto: !c.parseAuto }; }, function(wrap, save){
+      var per = numInput(cfg.parsePerHour, 1, 200);
+      wrap.appendChild(per);
+      wrap.appendChild(el('button', {class:'small primary', onclick:function(){ save({ parsePerHour: Number(per.value) }); }}, ['保存']));
+    }));
+
+    card.appendChild(protectRow('新人验证', cfg.captcha ? ({button:'按钮',math:'算术',question:'问答',image:'图形验证码',subscribe:'订阅频道'})[cfg.captchaMode] : '关', Boolean(cfg.captcha), function(c){ return { captcha: !c.captcha }; }, function(wrap, save){
+      var mode = el('select', null, [
+        el('option',{value:'button'},['按钮']), el('option',{value:'math'},['算术']),
+        el('option',{value:'question'},['问答']), el('option',{value:'image'},['图形验证码']),
+        el('option',{value:'subscribe'},['订阅频道'])
+      ]);
+      mode.value = cfg.captchaMode;
+      wrap.appendChild(mode);
+      wrap.appendChild(el('button', {class:'small primary', onclick:function(){ save({ captchaMode: mode.value }); }}, ['保存']));
+    }));
+
+    return card;
   }
 
   function renderMain(){
@@ -317,11 +520,13 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
       return;
     }
     var tabs = el('div', {class:'tabs'});
-    [['rules','规则'],['stats','统计'],['ai','AI 审核'],['parse','解析'],['words','热词'],['blocks','屏蔽'],['sync','同步'],['notes','说明'],['filters','自动回复'],['sched','定时消息'],['tools','工具箱']].forEach(function(pair){
+    [['rules','规则'],['protect','防护'],['members','成员'],['stats','统计'],['ai','AI 审核'],['parse','解析'],['words','热词'],['blocks','屏蔽'],['sync','同步'],['notes','说明'],['filters','自动回复'],['sched','定时消息'],['tools','工具箱']].forEach(function(pair){
       tabs.appendChild(el('button', {class: pair[0]===state.tab?'on':'', onclick:function(){ state.tab=pair[0]; renderMain(); }}, [pair[1]]));
     });
     main.appendChild(tabs);
     if (state.tab === 'rules') main.appendChild(renderRules());
+    if (state.tab === 'protect') main.appendChild(renderProtect());
+    if (state.tab === 'members') renderMembers();
     if (state.tab === 'stats') main.appendChild(renderStats());
     if (state.tab === 'notes') main.appendChild(renderNotes());
     if (state.tab === 'filters') main.appendChild(renderFilters());
@@ -758,11 +963,11 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     kindSel.addEventListener('change', function(){ loadEvents(state.chat.chatId, 0, kindSel.value); });
     card.appendChild(el('div', {class:'row', style:'margin-bottom:8px'}, [kindSel]));
     var rows = (log && log.events) || (state.chat.events || []);
-    var ev = el('table', null, [el('tr', null, [el('th',null,['时间']), el('th',null,['动作']), el('th',null,['对象']), el('th',null,['原因'])])]);
+    var ev = el('table', null, [el('tr', null, [el('th',null,['时间']), el('th',null,['动作']), el('th',null,['对象']), el('th',null,['原因']), el('th',null,['操作人'])])]);
     rows.forEach(function(e){
-      ev.appendChild(el('tr', null, [el('td',null,[new Date(e.at).toLocaleString()]), el('td',null,[label(e.kind)]), el('td',null,[String(e.userId||'-')]), el('td',null,[e.reason||''])]));
+      ev.appendChild(el('tr', null, [el('td',null,[new Date(e.at).toLocaleString()]), el('td',null,[label(e.kind)]), el('td',null,[String(e.userId||'-')]), el('td',null,[e.reason||'']), el('td',null,[e.byId ? String(e.byId) : '-'])]));
     });
-    if (!rows.length) ev.appendChild(el('tr', null, [el('td',{class:'muted'},['没有匹配的记录']), el('td',null,['']), el('td',null,['']), el('td',null,[''])]));
+    if (!rows.length) ev.appendChild(el('tr', null, [el('td',{class:'muted'},['没有匹配的记录']), el('td',null,['']), el('td',null,['']), el('td',null,['']), el('td',null,[''])]));
     card.appendChild(ev);
     if (log && (log.offset > 0 || log.hasMore)) {
       var nav = el('div', {class:'row', style:'margin-top:8px'});
@@ -773,18 +978,36 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     return card;
   }
 
+  // Small client-side filter for a short in-memory list — the console's
+  // notes/filters/schedules rarely exceed a screen, so a search box beats a
+  // server round-trip.
+  function listFilter(holder, list, renderItems){
+    var input = el('input', {type:'search', placeholder:'筛选…', style:'margin-bottom:8px'});
+    var render = function(){
+      var needle = input.value.trim().toLowerCase();
+      clear(list);
+      renderItems(list, needle);
+    };
+    input.addEventListener('input', render);
+    holder.appendChild(input);
+    holder.appendChild(list);
+    render();
+  }
+
   function renderNotes(){
     var card = el('div', {class:'card'});
     card.appendChild(el('h2', null, ['说明（/get 名字）']));
     var name = el('input', {placeholder:'名字'}); var content = el('textarea', {placeholder:'内容'});
-    var list = el('div');
-    (state.chat.notes||[]).forEach(function(n){
-      list.appendChild(el('div', {class:'row', style:'border-bottom:1px solid #1f2a37;padding:6px 0'}, [
-        el('b', null, [n.name]), el('span', {class:'muted', style:'flex:1'}, [String(n.content).slice(0,60)]),
-        el('button', {class:'small danger', onclick:function(){ api('/api/chat/'+state.chat.chatId+'/note/'+encodeURIComponent(n.name), {method:'DELETE'}).then(function(){ refreshChat(); }).catch(function(e){ toast(e.message); }); }}, ['删除'])
-      ]));
+    var filterBox = el('div');
+    card.appendChild(filterBox);
+    listFilter(filterBox, el('div'), function(list, needle){
+      (state.chat.notes||[]).filter(function(n){ return !needle || (n.name + ' ' + n.content).toLowerCase().indexOf(needle) >= 0; }).forEach(function(n){
+        list.appendChild(el('div', {class:'row', style:'border-bottom:1px solid #1f2a37;padding:6px 0'}, [
+          el('b', null, [n.name]), el('span', {class:'muted', style:'flex:1'}, [String(n.content).slice(0,60)]),
+          el('button', {class:'small danger', onclick:function(){ api('/api/chat/'+state.chat.chatId+'/note/'+encodeURIComponent(n.name), {method:'DELETE'}).then(function(){ refreshChat(); }).catch(function(e){ toast(e.message); }); }}, ['删除'])
+        ]));
+      });
     });
-    card.appendChild(list);
     card.appendChild(el('div', {style:'height:10px'}));
     card.appendChild(el('div', {class:'row'}, [name]));
     card.appendChild(el('div', {style:'height:8px'}));
@@ -802,14 +1025,16 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     card.appendChild(el('h2', null, ['自动回复']));
     var trig = el('input', {placeholder:'触发词'}); var resp = el('input', {placeholder:'回复内容'});
     var mode = el('select', null, [el('option',{value:'exact'},['完全相同']), el('option',{value:'prefix'},['开头匹配']), el('option',{value:'regex'},['正则'])]);
-    var list = el('div');
-    (state.chat.filters||[]).forEach(function(f){
-      list.appendChild(el('div', {class:'row', style:'border-bottom:1px solid #1f2a37;padding:6px 0'}, [
-        el('span', {class:'pill'}, [f.match]), el('b', null, [f.trigger]), el('span', {class:'muted', style:'flex:1'}, ['→ ' + f.response]),
-        el('button', {class:'small danger', onclick:function(){ api('/api/chat/'+state.chat.chatId+'/filter/'+f.id, {method:'DELETE'}).then(function(){ refreshChat(); }).catch(function(e){ toast(e.message); }); }}, ['删除'])
-      ]));
+    var filterBox = el('div');
+    card.appendChild(filterBox);
+    listFilter(filterBox, el('div'), function(list, needle){
+      (state.chat.filters||[]).filter(function(f){ return !needle || (f.trigger + ' ' + f.response).toLowerCase().indexOf(needle) >= 0; }).forEach(function(f){
+        list.appendChild(el('div', {class:'row', style:'border-bottom:1px solid #1f2a37;padding:6px 0'}, [
+          el('span', {class:'pill'}, [f.match]), el('b', null, [f.trigger]), el('span', {class:'muted', style:'flex:1'}, ['→ ' + f.response]),
+          el('button', {class:'small danger', onclick:function(){ api('/api/chat/'+state.chat.chatId+'/filter/'+f.id, {method:'DELETE'}).then(function(){ refreshChat(); }).catch(function(e){ toast(e.message); }); }}, ['删除'])
+        ]));
+      });
     });
-    card.appendChild(list);
     card.appendChild(el('div', {class:'row', style:'margin-top:10px'}, [trig, mode, resp]));
     card.appendChild(el('div', {style:'height:8px'}));
     card.appendChild(el('button', {class:'primary', onclick:function(){
@@ -821,22 +1046,22 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
   function renderSched(){
     var card = el('div', {class:'card'});
     card.appendChild(el('h2', null, ['定时消息']));
-    var text = el('textarea', {placeholder:'消息内容（支持 HTML）'});
+    var text = el('textarea', {placeholder:'消息内容（支持 HTML）；包含 {{top}} 则发送时替换为今日发言榜'});
     var every = el('input', {type:'number', value:'3600', placeholder:'间隔秒，0=只发一次'});
-    var list = el('table', null, [el('tr', null, [el('th',null,['#']), el('th',null,['内容']), el('th',null,['间隔']), el('th',null,['下次']), el('th',null,['状态']), el('th',null,[''])])]);
-    (state.chat.schedules||[]).forEach(function(s){
-      list.appendChild(el('tr', null, [
-        el('td',null,[String(s.id)]), el('td',null,[String(s.text).slice(0,50)]),
-        el('td',null,[s.every>0 ? s.every+'s' : '一次']),
-        el('td',null,[new Date(s.nextAt).toLocaleString()]),
-        el('td',null,[s.enabled ? '启用' : '停用']),
-        el('td', null, [
+    var filterBox = el('div');
+    card.appendChild(filterBox);
+    listFilter(filterBox, el('div'), function(list, needle){
+      (state.chat.schedules||[]).filter(function(s){ return !needle || String(s.text).toLowerCase().indexOf(needle) >= 0; }).forEach(function(s){
+        list.appendChild(el('div', {class:'row', style:'border-bottom:1px solid #1f2a37;padding:6px 0'}, [
+          el('b', null, [String(s.text).slice(0,40)]),
+          el('span', {class:'muted', style:'width:110px'}, [s.every>0 ? '每 ' + s.every + 's' : '一次']),
+          el('span', {class:'muted', style:'width:130px'}, [new Date(s.nextAt).toLocaleString()]),
+          el('span', {class:'pill' + (s.enabled ? ' ok' : '')}, [s.enabled ? '启用' : '停用']),
           el('button', {class:'small', onclick:function(){ api('/api/schedule/'+s.id,{method:'POST',body:{enabled:!s.enabled}}).then(function(){ refreshChat(); }).catch(function(e){ toast(e.message); }); }}, [s.enabled?'停用':'启用']),
           el('button', {class:'small danger', onclick:function(){ api('/api/schedule/'+s.id,{method:'DELETE'}).then(function(){ refreshChat(); }).catch(function(e){ toast(e.message); }); }}, ['删除'])
-        ])
-      ]));
+        ]));
+      });
     });
-    card.appendChild(list);
     card.appendChild(el('div', {style:'height:10px'}));
     card.appendChild(text);
     card.appendChild(el('div', {style:'height:8px'}));
