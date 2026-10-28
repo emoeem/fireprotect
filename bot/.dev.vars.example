@@ -6,6 +6,8 @@ ADMIN_IDS=
 LOG_CHAT_ID=
 # /install 的安装密钥；worker 上必填，本机长轮询可不填
 WEBHOOK_SECRET=
+# 网页后台密码：和 ADMIN_TOKEN 二选一，两个都能登录；登录按来源地址限次
+ADMIN_PASSWORD=
 
 # 外部反垃圾（全部默认关闭，fail-open）
 # CAS 需要 Combot API key，没有 key 时 CAS 一律 401
@@ -19,3 +21,6 @@ TZ_OFFSET=480
 # 本机存储位置
 BOT_DB=bot.db
 BOT_STORE=.bot-store
+
+# Origin for the console link in /help. Optional; defaults to the workers.dev host.
+PUBLIC_URL=https://flareward-bot.pd2335346.workers.dev

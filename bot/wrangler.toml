@@ -40,6 +40,9 @@ LOG_CHAT_ID = ""
 # 夜间模式使用的时区（分钟，东经为正）。默认 +480。
 TZ_OFFSET = "480"
 ENVIRONMENT = "production"
+# Origin used to build the console link that /help hands out. Change it when the
+# Worker is served from a custom domain. No trailing slash.
+PUBLIC_URL = "https://flareward-bot.pd2335346.workers.dev"
 
 [observability]
 enabled = true

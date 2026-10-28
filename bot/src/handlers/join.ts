@@ -8,6 +8,7 @@ import { PERMS_MUTED, type Runtime } from "../context.ts";
 import { trackJoin } from "../flood.ts";
 import { ban, logAction, record, recordBan, say } from "../moderation.ts";
 import { escapeHtml } from "../telegram.ts";
+import { rememberChat } from "../db/repo.ts";
 import { issueChallenge } from "./verify.ts";
 import { forgetJoin, rememberJoin } from "./message.ts";
 import type { ChatConfig } from "../rules.ts";
@@ -95,6 +96,12 @@ async function onRaid(rt: Runtime, chatId: number, config: ChatConfig, count: nu
   } else {
     await say(rt, chatId, `${text}\n管理员可发 /lock 全群禁言。`);
   }
+  // The captcha is the actual raid filter. A group that ran with it off gets it
+  // switched on here: re-enabling it by hand at 3am is the step everyone forgets.
+  if (!config.captcha) {
+    await rt.saveConfig(chatId, { captcha: true });
+    await say(rt, chatId, "已自动开启新人验证（原先是关的）。确认安全后发 /captcha off 恢复。");
+  }
   await record(rt, { chatId, kind: "external", reason: `进群频率 ${count}/${config.joinRateWindow}s` });
 }
 
@@ -133,13 +140,32 @@ export async function handleMemberUpdate(rt: Runtime, update: TgChatMemberUpdate
 /** The bot's own membership: tell the operator what still has to be switched on. */
 export async function handleMyChatMember(rt: Runtime, update: TgChatMemberUpdated): Promise<void> {
   rt.admin.invalidate(update.chat.id);
+  // This is the one update that reliably carries the group's title, so it is
+  // where the console learns the chat exists.
+  await rememberChat(rt.db, {
+    chatId: update.chat.id,
+    title: update.chat.title ?? String(update.chat.id),
+    type: update.chat.type,
+    at: rt.now(),
+  }).catch(() => undefined);
   const status = update.new_chat_member.status;
   const wasIn = update.old_chat_member.status === "member" || update.old_chat_member.status === "administrator";
   if (status === "administrator") {
+    // The membership update itself carries the rights — no extra API call — so
+    // the checklist names exactly what is missing instead of "check three things".
+    const rights = update.new_chat_member;
+    const missing = [
+      rights.can_delete_messages ? "" : "删除消息",
+      rights.can_restrict_members ? "" : "封禁用户",
+      rights.can_pin_messages ? "" : "置顶消息",
+    ].filter(Boolean);
+    const checklist = missing.length
+      ? `还缺权限：${missing.join("、")}（群设置 → 管理员里勾上）。`
+      : "三项关键权限（删除 / 封禁 / 置顶）都齐了。";
     await say(
       rt,
       update.chat.id,
-      "已就位。建议确认三项权限：删除消息、封禁用户、置顶消息。\n配置用 /help 看命令，新人验证默认是开的。",
+      `已就位。${checklist}\n收不到普通消息的话，去 @BotFather 把 Privacy Mode 关掉。配置用 /help 看命令。`,
     );
     return;
   }
