@@ -26,6 +26,19 @@ export type TgChat = {
   is_forum?: boolean;
 };
 
+/** One uploaded file (document, photo size, sticker…). */
+export type TgFile = {
+  file_id: string;
+  file_unique_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  file_size?: number;
+  width?: number;
+  height?: number;
+  /** Video/animation/document preview frame — the only image we can moderate. */
+  thumbnail?: TgFile;
+};
+
 export type TgMessageEntity = {
   type: string;
   offset: number;
@@ -55,14 +68,14 @@ export type TgMessage = {
   edit_date?: number;
   via_bot?: TgUser;
   // Media, one field per lock kind.
-  photo?: unknown[];
-  video?: unknown;
-  animation?: unknown;
-  sticker?: unknown;
-  document?: unknown;
-  audio?: unknown;
-  voice?: unknown;
-  video_note?: unknown;
+  photo?: TgFile[];
+  video?: TgFile;
+  animation?: TgFile;
+  sticker?: TgFile;
+  document?: TgFile;
+  audio?: TgFile;
+  voice?: TgFile;
+  video_note?: TgFile;
   poll?: { id?: string; question?: string };
   // Any of these present means "this arrived from somewhere else".
   forward_origin?: unknown;
@@ -83,6 +96,14 @@ export type TgChatMember = {
   user: TgUser;
   is_anonymous?: boolean;
   until_date?: number;
+  // Administrator rights: present on administrator/creator members. The bot's
+  // own membership updates carry them, which is how the onboarding checklist
+  // names exactly the rights that are still missing.
+  can_delete_messages?: boolean;
+  can_restrict_members?: boolean;
+  can_pin_messages?: boolean;
+  can_change_info?: boolean;
+  can_invite_users?: boolean;
 };
 
 export type TgChatMemberUpdated = {
@@ -97,6 +118,8 @@ export type TgUpdate = {
   update_id?: number;
   message?: TgMessage;
   edited_message?: TgMessage;
+  /** A post in a channel where the bot is an admin; drives instant mirrors. */
+  channel_post?: TgMessage;
   callback_query?: TgCallbackQuery;
   my_chat_member?: TgChatMemberUpdated;
   chat_member?: TgChatMemberUpdated;
@@ -152,7 +175,6 @@ export interface D1Like {
     run(): Promise<unknown>;
   };
   batch(statements: unknown[]): Promise<unknown[]>;
-  exec(query: string): Promise<unknown>;
 }
 
 export type Env = {
@@ -171,9 +193,21 @@ export type Env = {
   FEDERATION_TOKEN?: string;
   /** Combot API key for CAS; without it CAS refuses every request (401). */
   CAS_KEY?: string;
+  /** Web console password. Unset disables the console entirely. */
+  ADMIN_TOKEN?: string;
+  /**
+   * Human-typed console password, alongside `ADMIN_TOKEN`. Either one logs in;
+   * `ADMIN_TOKEN` still wins as the cookie signing key so rotating a password
+   * does not silently invalidate nothing. Login is rate-limited per address
+   * because this value is short by design.
+   */
+  ADMIN_PASSWORD?: string;
   /** Base URL of this deployment, used to build the webhook URL. */
   PUBLIC_URL?: string;
   ENVIRONMENT?: string;
   /** Minutes east of UTC for night mode; default +480. */
   TZ_OFFSET?: string;
+  /** Vision moderation: API key, and the generic provider's endpoint. */
+  VISION_KEY?: string;
+  VISION_URL?: string;
 };

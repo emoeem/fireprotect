@@ -70,10 +70,12 @@ test("a correct key registers the webhook with a secret token and narrow update 
   assert.equal(body.secret_token, "s3cret");
   assert.deepEqual(body.allowed_updates, [
     "message",
+    "edited_message",
     "callback_query",
     "my_chat_member",
     "chat_member",
     "chat_join_request",
+    "channel_post",
   ]);
   assert.equal(body.drop_pending_updates, false);
 });

@@ -11,9 +11,11 @@
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "test:coverage": "node --experimental-strip-types --test --experimental-test-coverage test/*.test.ts",
+    "test:coverage": "node scripts/coverage-gate.mjs",
     "live": "node --experimental-strip-types scripts/live-check.ts",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "fixtures": "node --experimental-strip-types scripts/test-fixtures/make-fixtures.ts",
+    "verify": "npm run typecheck && npm run lint && npm run test:coverage"
   },
   "engines": {
     "node": ">=22"
@@ -22,6 +24,9 @@
     "drizzle-orm": "^0.45.4",
     "he": "^2.0.0",
     "lru-cache": "^11.5.3",
+    "pdf-lib": "^1.17.1",
+    "rss-parser": "^3.13.0",
+    "sharp": "^0.35.5",
     "tldts": "^7.4.19",
     "zod": "^4.6.7"
   },

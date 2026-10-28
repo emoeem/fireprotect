@@ -13,6 +13,7 @@
  * message, and the deletion of that message. Nothing else is touched.
  */
 import { Telegram } from "../src/telegram.ts";
+import { BOT_COMMANDS } from "../src/menu.ts";
 
 const token = process.env.BOT_TOKEN ?? "";
 if (!token) {
@@ -42,16 +43,7 @@ if (me.result.can_read_all_group_messages === false) {
 }
 if (me.result.can_join_groups === false) bad("can_join_groups", "这个机器人被禁止加入群组");
 
-const commands = [
-  { command: "help", description: "命令列表" },
-  { command: "rules", description: "本群规则" },
-  { command: "id", description: "看自己的数字 ID" },
-  { command: "stats", description: "近 7 天处置统计" },
-  { command: "lock", description: "全群禁言 / 锁类型" },
-  { command: "unlock", description: "解除禁言 / 解锁类型" },
-  { command: "nightmode", description: "夜间模式" },
-  { command: "config", description: "当前配置（管理员）" },
-];
+const commands = BOT_COMMANDS;
 const set = await api.call("setMyCommands", { commands });
 if (set.ok) ok("setMyCommands", `${commands.length} 条`);
 else bad("setMyCommands", set.error);

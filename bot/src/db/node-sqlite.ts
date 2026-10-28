@@ -25,7 +25,7 @@ function normalize(params: unknown[]): Bound[] {
 
 export function openSqlite(path: string): SqliteHandle {
   const database = new DatabaseSync(path);
-  if (path !== ":memory:") database.exec("pragma journal_mode = WAL");
+  if (path !== ":memory:") database.prepare("pragma journal_mode = WAL").run();
 
   const client = async (query: string, params: unknown[], method: "run" | "all" | "get" | "values") => {
     const statement = database.prepare(query);

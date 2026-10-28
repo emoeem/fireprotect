@@ -17,9 +17,16 @@ import { inspect } from "../filters.ts";
 import { duplicateSignal, scoreMessage } from "../heuristics.ts";
 import { trackFlood } from "../flood.ts";
 import { matchReplyFilter } from "../replies.ts";
+import { keywordPolicy } from "../keywords.ts";
+import { checkMedia } from "../ai/pipeline.ts";
+import { visionSubject } from "../ai/vision.ts";
+import { bumpWords } from "../ai/words.ts";
+import { allowParse, enqueueParse, runParseJob } from "../parse/service.ts";
+import { firstSupported } from "../parse/sites.ts";
 import { inNightWindow } from "../nightmode.ts";
-import { deleteMessages, punishAuto, say } from "../moderation.ts";
-import { filterList, isTrusted } from "../db/repo.ts";
+import { deleteMessages, muteFor, punishAuto, record, say } from "../moderation.ts";
+import { blocked } from "../block.ts";
+import { filterList, isTrusted, rememberChat } from "../db/repo.ts";
 import { handleCommand } from "./commands.ts";
 import { answerChallenge, pendingChallenge } from "./verify.ts";
 import type { FilterRow } from "../db/schema.ts";
@@ -37,8 +44,28 @@ export function invalidateFilters(rt: Runtime, chatId: number): void {
   cachesFor(rt).filters.delete(chatId);
 }
 
+/**
+ * Put the chat in the console's list the first time this isolate sees it.
+ *
+ * A group where nobody ever runs a command would otherwise never appear in the
+ * admin console, and its owner would conclude the bot is broken. One write per
+ * chat per isolate keeps that free.
+ */
+async function ensureRegistered(rt: Runtime, chat: TgMessage["chat"]): Promise<void> {
+  const registry = cachesFor(rt).registered;
+  if (registry.has(chat.id)) return;
+  registry.set(chat.id, true);
+  await rememberChat(rt.db, {
+    chatId: chat.id,
+    title: chat.title ?? String(chat.id),
+    type: chat.type,
+    at: rt.now(),
+  }).catch(() => registry.delete(chat.id));
+}
+
 export async function handleMessage(rt: Runtime, msg: TgMessage): Promise<void> {
   const chatId = msg.chat.id;
+  if (msg.chat.type !== "private") await ensureRegistered(rt, msg.chat);
   const config = await rt.configFor(chatId);
   const text = msg.text ?? "";
 
@@ -50,6 +77,19 @@ export async function handleMessage(rt: Runtime, msg: TgMessage): Promise<void> 
 
   const from = msg.from;
   if (!from) return;
+
+  // Shadow ban: delete and say nothing. This sits before verification on
+  // purpose — a blocked member must not be able to earn their way back in by
+  // answering a captcha they were never meant to see.
+  if (await blocked(rt, chatId, from.id)) {
+    await deleteMessages(rt, chatId, [msg.message_id]);
+    await record(rt, { chatId, userId: from.id, kind: "delete", reason: "已屏蔽成员（静默）" });
+    return;
+  }
+
+  // Master switch: off still lets commands through (so an admin can turn it
+  // back on) but stops every automatic action.
+  if (!config.enabled) return;
 
   // 2. a pending free-text answer is not spam
   const pending = await pendingChallenge(rt, chatId, from.id);
@@ -95,14 +135,92 @@ export async function handleMessage(rt: Runtime, msg: TgMessage): Promise<void> 
   const trusted = joinedAt ? await trustedOf(rt, chatId, from.id) : false;
   const verdict = inspect({ msg, config, nowMs: rt.now(), joinedAt, trusted, heuristicScore: heuristic });
   if (verdict.hit) {
+    // A keyword hit has three possible outcomes; every other rule has one.
+    if (verdict.kind === "keyword") {
+      if (keywordPolicy(config, from.id) === "record") {
+        // Recorded, never touched: the whitelist exists so a sponsor can post
+        // "加微信" without the bot deleting their livelihood.
+        await record(rt, { chatId, userId: from.id, kind: "watch", reason: `只记录：${verdict.reason}` });
+        return;
+      }
+      if (config.keywordAction === "mute") {
+        await muteFor(rt, msg, config.muteMinutes, verdict.reason);
+        return;
+      }
+    }
     await punishAuto(rt, msg, config, verdict.reason);
     return;
+  }
+
+  // 5b. media moderation. Paid per image, so it runs only after every free rule
+  // has already passed — a message a keyword already caught never costs a call.
+  if (config.ai) {
+    const subject = visionSubject(msg);
+    if (subject) {
+      const media = await checkMedia(rt, config, chatId, subject);
+      if (media.hit) {
+        await punishAuto(rt, msg, config, media.reason);
+        return;
+      }
+    }
+  }
+
+  // 5c. hot words: counting only, never a moderation decision.
+  if (config.hotWords && text) await bumpWords(rt, chatId, text);
+
+  // 5d. optional auto-parse. Off by default because it costs a request per link
+  // and most groups would rather choose when to spend it. Failure is silent by
+  // design: the original message is never touched.
+  if (config.parseAuto) {
+    const found = firstSupported(text, msg.entities ?? []);
+    if (found && allowParse(rt, chatId, config.parsePerHour)) {
+      const jobId = await enqueueParse(rt, { chatId, userId: from.id, messageId: msg.message_id, url: found.url, site: found.site });
+      await runParseJob(rt, { id: jobId, chatId, messageId: msg.message_id, url: found.url, site: found.site }).catch(() => undefined);
+    }
   }
 
   // 6. auto-replies
   const filters = await filtersOf(rt, chatId);
   const match = matchReplyFilter(filters, text);
   if (match) await say(rt, chatId, match.response, { replyTo: msg.message_id });
+}
+
+/**
+ * The edit path: same rules as a fresh message, narrower consequences.
+ *
+ * An edit is visible to every reader the moment Telegram re-renders it, so a
+ * clean post edited into spam must hit the same rules. But it only ever deletes
+ * and records: no flood tracking (the message was already admitted), no
+ * duplicate fingerprint (an edit must not poison the fingerprints cache), and
+ * no `punishAuto` — so one message can never advance the warn ladder twice.
+ */
+export async function handleEditedMessage(rt: Runtime, msg: TgMessage): Promise<void> {
+  const chatId = msg.chat.id;
+  if (msg.chat.type !== "group" && msg.chat.type !== "supergroup") return;
+  const config = await rt.configFor(chatId);
+  if (!config.enabled) return;
+  const from = msg.from;
+  if (!from) return;
+
+  if (await blocked(rt, chatId, from.id)) {
+    await deleteMessages(rt, chatId, [msg.message_id]);
+    await record(rt, { chatId, userId: from.id, kind: "delete", reason: "已屏蔽成员（编辑）" });
+    return;
+  }
+  if (await rt.admin.isAdmin(chatId, from.id)) return;
+  if (from.is_bot && !config.locks.includes("bots")) return;
+
+  const heuristic = scoreMessage(msg).score;
+  const joinedAt = await joinedAtOf(rt, chatId, from.id);
+  const trusted = joinedAt ? await trustedOf(rt, chatId, from.id) : false;
+  const verdict = inspect({ msg, config, nowMs: rt.now(), joinedAt, trusted, heuristicScore: heuristic });
+  if (!verdict.hit) return;
+  if (verdict.kind === "keyword" && keywordPolicy(config, from.id) === "record") {
+    await record(rt, { chatId, userId: from.id, kind: "watch", reason: `编辑只记录：${verdict.reason}` });
+    return;
+  }
+  await deleteMessages(rt, chatId, [msg.message_id]);
+  await record(rt, { chatId, userId: from.id, kind: "delete", reason: `编辑后命中：${verdict.reason}` });
 }
 
 async function joinedAtOf(rt: Runtime, chatId: number, userId: number): Promise<number | undefined> {

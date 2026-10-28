@@ -23,6 +23,10 @@ dist/
 *.swp
 .grok/preview.pid
 
+# agent / tool state (never project code)
+.mimosa/
+.zcode/
+
 # bot local state / secrets (bot/ is a standalone package)
 bot/.dev.vars
 bot/.bot-data/

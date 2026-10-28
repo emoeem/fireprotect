@@ -102,7 +102,15 @@ export async function handleInstall(request: Request, env: Env): Promise<Install
     body: JSON.stringify({
       url: webhookUrl,
       secret_token: secret,
-      allowed_updates: ["message", "callback_query", "my_chat_member", "chat_member", "chat_join_request"],
+      allowed_updates: [
+        "message",
+        "edited_message",
+        "callback_query",
+        "my_chat_member",
+        "chat_member",
+        "chat_join_request",
+        "channel_post",
+      ],
       drop_pending_updates: false,
     }),
   });

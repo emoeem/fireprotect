@@ -39,6 +39,10 @@ export type CaptchaMode = (typeof CAPTCHA_MODES)[number];
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+/** Regex filter limits. Exported so `keywords.ts` validates against the same numbers. */
+export const MAX_PATTERN_CHARS = 200;
+export const MAX_PATTERNS = 20;
+
 const strikeSchema = z.object({
   at: z.number().int().min(1).max(20),
   action: z.enum(["warn", "mute", "ban", "kick"]),
@@ -48,6 +52,8 @@ const strikeSchema = z.object({
 export type Strike = z.infer<typeof strikeSchema>;
 
 export const configSchema = z.object({
+  /** Master switch: off means the bot only answers admin commands. */
+  enabled: z.boolean().default(true),
   // --- newcomer verification ------------------------------------------------
   captcha: z.boolean().default(true),
   captchaMode: z.enum(CAPTCHA_MODES).default("button"),
@@ -71,6 +77,31 @@ export const configSchema = z.object({
   locks: z.array(z.enum(LOCK_KINDS)).max(LOCK_KINDS.length).default(["links"]),
   /** 0 disables the length filter. */
   maxLength: z.number().int().min(0).max(4000).default(1200),
+  /**
+   * What a keyword hit does. `record` is the "show me, don't touch" mode an
+   * admin uses for a week before committing to a rule.
+   */
+  keywordAction: z.enum(["delete", "mute", "record"]).default("delete"),
+  /** Regular expressions, same match semantics as keywords. */
+  keywordPatterns: z.array(z.string().min(1).max(MAX_PATTERN_CHARS)).max(MAX_PATTERNS).default([]),
+  /** Sponsors: their keyword hits are recorded, never acted on. */
+  adWhitelist: z.array(z.number().int().min(1)).max(200).default([]),
+
+  // --- AI vision (optional, off by default) --------------------------------
+  ai: z.boolean().default(false),
+  aiProvider: z.enum(["generic", "cloud-vision"]).default("generic"),
+  /** 0-100; a category must reach this to count as a hit. */
+  aiMinScore: z.number().int().min(50).max(100).default(80),
+  aiCategories: z.array(z.enum(["nsfw", "gambling", "ad", "qr"])).max(4).default(["nsfw", "gambling", "ad", "qr"]),
+  /** Calls per day per chat; crossing it alerts once and stops calling. */
+  aiDailyBudget: z.number().int().min(10).max(20_000).default(500),
+
+  // --- link parsing (optional) ---------------------------------------------
+  /** Parse supported links the moment they appear, without /parse. */
+  parseAuto: z.boolean().default(false),
+  parsePerHour: z.number().int().min(1).max(200).default(10),
+  /** Daily hot-word counting. Cheap, but a group may not want it. */
+  hotWords: z.boolean().default(true),
 
   // --- flood ----------------------------------------------------------------
   floodLimit: z.number().int().min(0).max(60).default(0),
@@ -121,6 +152,7 @@ export const DEFAULT_CONFIG: ChatConfig = configSchema.parse({});
 
 /** Fields `/set` accepts, with the one-line help shown when the syntax is wrong. */
 export const SETTABLE: Record<string, string> = {
+  enabled: "on/off — 本群总开关（关=只答命令，不处置）",
   captcha: "on/off — 新人验证",
   captchaMode: "button/math/question — 验证方式",
   captchaTimeout: "秒，30–86400 — 验证时限",
@@ -147,6 +179,14 @@ export const SETTABLE: Record<string, string> = {
   nightEnd: "HH:MM — 夜间结束",
   cas: "on/off — 接入 CAS 反垃圾库",
   federation: "on/off — 接入联邦黑名单",
+  keywordAction: "delete/mute/record — 关键词命中后的动作",
+  ai: "on/off — 图片视觉审核（需 VISION_KEY/VISION_URL）",
+  aiProvider: "generic/cloud-vision — 视觉服务类型",
+  aiMinScore: "50–100 — 判定阈值",
+  aiDailyBudget: "次/天 — 视觉调用上限，超了告警并停用",
+  parseAuto: "on/off — 自动解析群里的抖音/小红书/推特/B站链接",
+  parsePerHour: "次 — 每群每小时解析上限",
+  hotWords: "on/off — 每日热词统计",
   logChatId: "频道/群数字 ID，或 off",
 };
 
@@ -160,9 +200,13 @@ const NUMBER_FIELDS = new Set([
   "newbieHours",
   "joinRateMax",
   "joinRateWindow",
+  "aiMinScore",
+  "aiDailyBudget",
+  "parsePerHour",
 ]);
 
 const BOOL_FIELDS = new Set([
+  "enabled",
   "captcha",
   "captchaKick",
   "welcome",
@@ -171,6 +215,9 @@ const BOOL_FIELDS = new Set([
   "nightMode",
   "cas",
   "federation",
+  "ai",
+  "parseAuto",
+  "hotWords",
 ]);
 
 /** Coerce one `/set` value the way the field's type demands. */
@@ -305,6 +352,11 @@ export function describeConfig(config: ChatConfig): string[] {
   if (config.newbieHours > 0) lines.push(`新人限制：入群 ${config.newbieHours} 小时内禁${config.newbieBlocks.map((b) => (b === "links" ? "链接" : "提及")).join("和")}`);
   if (config.joinRateMax > 0) lines.push(`进群限速：${config.joinRateWindow} 秒最多 ${config.joinRateMax} 人，超限${config.joinRateAction === "lock" ? "锁群" : "提醒"}`);
   if (config.nightMode) lines.push(`夜间模式：${config.nightStart}–${config.nightEnd} 只允许管理员发言`);
+  if (config.keywordPatterns.length) lines.push(`正则：${config.keywordPatterns.length} 条`);
+  if (config.keywordAction !== "delete") lines.push(`关键词命中：${config.keywordAction === "mute" ? "删除并禁言" : "只记录"}`);
+  if (config.adWhitelist.length) lines.push(`广告白名单：${config.adWhitelist.length} 人（只记录）`);
+  lines.push(`图片审核：${config.ai ? `开（${config.aiProvider}，阈值 ${config.aiMinScore}，预算 ${config.aiDailyBudget}/天）` : "关"}`);
+  if (config.parseAuto) lines.push(`链接解析：开（${config.parsePerHour} 次/小时）`);
   const ext = [config.cas && "CAS", config.federation && "联邦"].filter(Boolean);
   lines.push(`外部库：${ext.length ? ext.join("、") : "全关"}`);
   lines.push(`记录：${config.logChatId || "未设置"}`);

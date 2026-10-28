@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.wrangler/
+.admin-token
+bot.db
+bot.db-*
+.bot-store/
+.dev.vars*
+.webhook-secret
+scripts/test-fixtures/out/

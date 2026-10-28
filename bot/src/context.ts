@@ -13,6 +13,9 @@ import { type ChatConfig, DEFAULT_CONFIG, applyPatch, normalizeLegacy, patchErro
 import { memoryStore } from "./store.ts";
 import { Telegram } from "./telegram.ts";
 import { Screener } from "./external/screen.ts";
+import { Vision } from "./ai/vision.ts";
+import type { ParseDownloader } from "./parse/service.ts";
+import { Previewer } from "./parse/preview.ts";
 import { healthMark } from "./db/repo.ts";
 import { migrate } from "./db/migrate.ts";
 import { bannedUsers } from "./db/schema.ts";
@@ -20,6 +23,8 @@ import { eq } from "drizzle-orm";
 import type { Db } from "./db/repo.ts";
 import type { SqliteHandle } from "./db/connect.ts";
 import type { Env, Store, TgChatPermissions, TgUser } from "./types.ts";
+import type { OcrEngine } from "./ocr.ts";
+import type { FeedParser } from "./rss.ts";
 
 const CONFIG_TTL_MS = 60_000;
 const ADMIN_TTL_MS = 10 * 60_000;
@@ -42,6 +47,10 @@ export type Runtime = {
   sql: SqliteHandle;
   admin: AdminResolver;
   screener: Screener;
+  /** Optional image moderation; `configured()` decides whether it is worth a call. */
+  vision: Vision;
+  /** Link previews for `/parse`; the Worker's only media path. */
+  previewer: Previewer;
   now: () => number;
   /** Minutes east of UTC used by night mode. */
   tzOffset: number;
@@ -50,9 +59,50 @@ export type Runtime = {
   invalidate: (chatId: number) => void;
   /** Serialises handlers for one chat so two events cannot punish twice. */
   withChatLock: <T>(chatId: number, fn: () => Promise<T>) => Promise<T>;
+  /** Chats whose first-activation preset has been handled in this isolate. */
+  initialized: Set<number>;
+  /**
+   * Image slicing, injected by the Node entry only. `sharp` is native, so the
+   * Worker must never import it; the console and `/slice` both check for this.
+   */
+  /**
+   * Image slicing, injected only by the Node entry.
+   *
+   * The shape is declared here rather than imported from `tools/slice.node.ts`
+   * so the Worker dependency graph never reaches a `sharp` module.
+   */
+  sliceImage?: (
+    bytes: Uint8Array,
+    height?: number,
+  ) => Promise<{
+    slices: { index: number; data: Uint8Array; width: number; height: number }[];
+    total: number;
+    truncated: boolean;
+  }>;
+  /**
+   * Image → text. Injected only by the Node entry (tesseract is a subprocess);
+   * `src/ocr.ts` declares this shape so the Worker graph never names the adapter.
+   */
+  ocr?: OcrEngine;
+  /**
+   * Feed → items. Injected only by the Node entry (`rss-parser` assumes Node
+   * globals). Present iff the deployment can poll RSS at all.
+   */
+  rssParse?: FeedParser;
+  /**
+   * Media fetch for `/parse`, injected only by the Node entry.
+   *
+   * Absent in the Worker, which is what makes `/parse` degrade to an OpenGraph
+   * preview instead of failing: the capability decides the behaviour.
+   */
+  parseDownloader?: ParseDownloader;
 };
 
 export type RuntimeDeps = {
+  sliceImage?: Runtime["sliceImage"];
+  ocr?: Runtime["ocr"];
+  rssParse?: Runtime["rssParse"];
+  parseDownloader?: ParseDownloader;
   store?: Store;
   api?: Telegram;
   sqlite?: SqliteHandle;
@@ -93,7 +143,17 @@ export function createRuntime(env: Env, deps: RuntimeDeps & { sqlite: SqliteHand
     onHealth: (name, ok, error) => healthMark(db, name, ok, error, now()),
   });
 
+  const vision = new Vision({
+    key: env.VISION_KEY,
+    url: env.VISION_URL,
+    fetchImpl: deps.fetchImpl,
+    onHealth: (name, ok, error) => healthMark(db, name, ok, error, now()),
+  });
+
+  const previewer = new Previewer({ fetchImpl: deps.fetchImpl });
+
   const locks = new Map<number, Promise<unknown>>();
+  const initialized = new Set<number>();
 
   const runtime: Runtime = {
     env,
@@ -103,8 +163,15 @@ export function createRuntime(env: Env, deps: RuntimeDeps & { sqlite: SqliteHand
     sql,
     admin,
     screener,
+    vision,
+    previewer,
     now,
     tzOffset,
+    initialized,
+    sliceImage: deps.sliceImage,
+    ocr: deps.ocr,
+    rssParse: deps.rssParse,
+    parseDownloader: deps.parseDownloader,
 
     async configFor(chatId) {
       const cached = configs.get(chatId);

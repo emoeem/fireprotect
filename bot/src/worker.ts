@@ -14,6 +14,11 @@ import { createRuntime, ensureSchema, type Runtime } from "./context.ts";
 import { openD1 } from "./db/d1.ts";
 import { handleInstall, healthBody, webhookSecret } from "./install.ts";
 import { sweepExpired } from "./handlers/verify.ts";
+import { handleApi } from "./admin/api.ts";
+import { renderConsole } from "./admin/page.ts";
+import { notifyOperators } from "./notify.ts";
+import { runRetention, runScheduled } from "./scheduler.ts";
+import { runSync } from "./sync.ts";
 import { safeEqual } from "./telegram.ts";
 import type { Env, TgUpdate } from "./types.ts";
 
@@ -49,6 +54,22 @@ export default {
       return json(body);
     }
 
+    if (path === "/admin" || path === "/admin/") {
+      return new Response(renderConsole(), {
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
+      });
+    }
+
+    if (path.startsWith("/api/")) {
+      try {
+        const runtime = runtimeFor(env);
+        await ensureSchema(runtime.sql);
+        return await handleApi(request, env, runtime, url);
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 503);
+      }
+    }
+
     if (path === "/install") {
       const result = await handleInstall(request, env);
       return new Response(result.body, {
@@ -81,24 +102,56 @@ export default {
     }
 
     if (path === "/") {
-      return new Response("flareward bot: /install · /health · /webhook", { status: 200 });
+      return new Response("flareward bot: /admin · /install · /health · /webhook", { status: 200 });
     }
     return new Response("not found", { status: 404 });
   },
 
   async scheduled(_event: unknown, env: Env, ctx: ExecutionCtx): Promise<void> {
+    let runtime: Runtime | undefined;
     try {
-      const runtime = runtimeFor(env);
-      await ensureSchema(runtime.sql);
+      const rt = runtimeFor(env);
+      runtime = rt;
+      await ensureSchema(rt.sql);
       ctx.waitUntil(
-        sweepExpired(runtime)
+        runScheduled(rt)
           .then((result) => {
-            if (result.expired) console.log(`sweep: expired ${result.expired}/${result.checked}`);
+            if (result.sent || result.failed) console.log(`scheduled: sent=${result.sent} failed=${result.failed} disabled=${result.disabled}`);
           })
-          .catch((err) => console.log(`sweep failed: ${err instanceof Error ? err.message : String(err)}`)),
+          .catch((err) => {
+            console.log(`scheduler failed: ${err instanceof Error ? err.message : String(err)}`);
+            void notifyOperators(rt, "cron-scheduled", `定时消息任务失败：${err instanceof Error ? err.message : String(err)}`);
+          }),
+      );
+      ctx.waitUntil(
+        (async () => {
+          const swept = await sweepExpired(rt).catch((err) => {
+            console.log(`sweep failed: ${err instanceof Error ? err.message : String(err)}`);
+            void notifyOperators(rt, "cron-sweep", `验证过期清理失败：${err instanceof Error ? err.message : String(err)}`);
+            return { checked: 0, expired: 0 };
+          });
+          if (swept.expired) console.log(`sweep: expired ${swept.expired}/${swept.checked}`);
+
+          // Mirrors run on the same tick: the interval is enforced per row, so
+          // a channel set to 10 minutes is checked once every ten minutes.
+          const synced = await runSync(rt).catch((err) => {
+            console.log(`sync failed: ${err instanceof Error ? err.message : String(err)}`);
+            void notifyOperators(rt, "cron-sync", `频道同步失败：${err instanceof Error ? err.message : String(err)}`);
+            return { checked: 0, copied: 0, failed: 0, disabled: 0 };
+          });
+          if (synced.copied) console.log(`sync: copied ${synced.copied}`);
+
+          await runRetention(rt).catch((err) => {
+            console.log(`retention failed: ${err instanceof Error ? err.message : String(err)}`);
+            void notifyOperators(rt, "cron-retention", `数据保留清理失败：${err instanceof Error ? err.message : String(err)}`);
+          });
+        })(),
       );
     } catch (err) {
       console.log(`scheduled failed: ${err instanceof Error ? err.message : String(err)}`);
+      // `runtime` exists only if runtimeFor and the schema step succeeded;
+      // without it there is no transport to send anything with.
+      if (runtime) void notifyOperators(runtime, "cron", `cron 任务失败：${err instanceof Error ? err.message : String(err)}`);
     }
   },
 };
