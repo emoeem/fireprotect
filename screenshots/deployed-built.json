@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "焰卫",
+      "hasCanvas": false,
+      "bodyTextLen": 18915,
+      "bodyTextHash": "f76e273516eb4eceef5de3e111f89d18ecfad1a06d55101925131e785865c621",
+      "bodyTextPrefix": "焰 CLOUDFLARE · TELEGRAM 焰卫 @fireprotcectbot 已经接在你的 Cloudflare 上。",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/deployed-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "焰卫",
+      "hasCanvas": false,
+      "bodyTextLen": 18915,
+      "bodyTextHash": "f76e273516eb4eceef5de3e111f89d18ecfad1a06d55101925131e785865c621",
+      "bodyTextPrefix": "焰 CLOUDFLARE · TELEGRAM 焰卫 @fireprotcectbot 已经接在你的 Cloudflare 上。",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/deployed-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/deployed-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}

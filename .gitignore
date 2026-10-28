@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+.node_modules.lock
+
+# build output
+.vercel/
+.output/
+.tanstack/
+dist/
+
+# runtime / logs
+*.log
+.grok/preview.log
+.grok/status
+
+# local env (never commit real secrets; the platform injects them)
+.env
+.env.*
+!.env.example
+
+# editor / OS
+.DS_Store
+*.swp

@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "焰卫",
+      "hasCanvas": false,
+      "bodyTextLen": 18656,
+      "bodyTextHash": "55bc67fcb8fa1785d04c7f0c11832169e356a075e32f4b6b586acd1b8888e351",
+      "bodyTextPrefix": "焰 CLOUDFLARE · TELEGRAM 焰卫 你自己的群管机器人。代码跑在你的 Cloudflare 上，令牌不进这份文",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "焰卫",
+      "hasCanvas": false,
+      "bodyTextLen": 18656,
+      "bodyTextHash": "55bc67fcb8fa1785d04c7f0c11832169e356a075e32f4b6b586acd1b8888e351",
+      "bodyTextPrefix": "焰 CLOUDFLARE · TELEGRAM 焰卫 你自己的群管机器人。代码跑在你的 Cloudflare 上，令牌不进这份文",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

@@ -1,0 +1,38 @@
+{
+  "url": "http://127.0.0.1:8081/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "焰卫",
+      "hasCanvas": false,
+      "bodyTextLen": 18656,
+      "bodyTextHash": "320c3186edd94b635fa40ed67874c15389969f4b1d05f2b85b7698b071bf49bc",
+      "bodyTextPrefix": "焰 CLOUDFLARE · TELEGRAM 焰卫 你自己的群管机器人。代码跑在你的 Cloudflare 上，令牌不进这份文",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "焰卫",
+      "hasCanvas": false,
+      "bodyTextLen": 18656,
+      "bodyTextHash": "320c3186edd94b635fa40ed67874c15389969f4b1d05f2b85b7698b071bf49bc",
+      "bodyTextPrefix": "焰 CLOUDFLARE · TELEGRAM 焰卫 你自己的群管机器人。代码跑在你的 Cloudflare 上，令牌不进这份文",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-built-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-built.json",
+  "divergesFromBaseline": false,
+  "baselineReasons": []
+}
