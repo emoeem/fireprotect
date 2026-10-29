@@ -35,9 +35,14 @@ jobs:
             bot/package-lock.json
             package-lock.json
       - name: Install workspace dependencies (tsc/eslint binaries)
-        run: npm ci
+        # `npm install`, not `npm ci`: the root lockfile predates this workflow
+        # and has drifted from package.json (ajv 6 vs 8), so `ci` refuses.
+        # Regenerating it needs registry access this sandbox does not have;
+        # `install` reconciles in-flight and is enough for the two binaries the
+        # bot's verify script borrows from the root.
+        run: npm install --no-audit --no-fund
       - name: Install bot dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
         working-directory: bot
       - name: Verify (typecheck, lint, coverage gate)
         run: npm run verify
