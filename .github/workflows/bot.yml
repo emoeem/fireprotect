@@ -45,5 +45,18 @@ jobs:
         run: npm install --no-audit --no-fund
         working-directory: bot
       - name: Verify (typecheck, lint, coverage gate)
-        run: npm run verify
+        # Output goes to a file so a failure can be summarised in a few lines:
+        # the full TAP stream exceeds GitHub's per-step log budget and gets
+        # truncated exactly where the failing test would be.
+        run: |
+          set -o pipefail
+          npm run verify 2>&1 | tee verify.log
+        working-directory: bot
+      - name: Failure summary
+        if: failure()
+        run: |
+          echo "=== failing tests ==="
+          grep -E "^✖ |^not ok|failing tests|AssertionError|error TS|^✖" verify.log | head -40 || true
+          echo "=== coverage table ==="
+          grep -E "all files|below|未达标|threshold" verify.log | head -20 || true
         working-directory: bot
