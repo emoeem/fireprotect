@@ -213,6 +213,9 @@ export const scheduledMessages = sqliteTable(
     createdBy: integer("created_by").notNull().default(0),
     sent: integer("sent").notNull().default(0),
     lastError: text("last_error").notNull().default(""),
+    /** 发送认领：cron 与 Node 长轮询双运行时的原子所有权标记（空串=未认领）。 */
+    claimToken: text("claim_token").notNull().default(""),
+    claimedAt: integer("claimed_at").notNull().default(0),
   },
   (table) => [index("idx_sched_next").on(table.enabled, table.nextAt)],
 );

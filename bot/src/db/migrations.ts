@@ -229,6 +229,8 @@ create table if not exists "member_stats" (
   primary key ("chat_id","day","user_id")
 );
 create index if not exists "idx_mstats_chat_day" on "member_stats" ("chat_id","day");
+alter table "scheduled_messages" add column "claim_token" text not null default '';
+alter table "scheduled_messages" add column "claimed_at" integer not null default 0;
 `.trim(),
   },
 ];

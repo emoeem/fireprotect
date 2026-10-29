@@ -18,7 +18,7 @@ import {
   wordStatsPrune,
   memberStatsPrune,
 } from "./db/repo.ts";
-import { scheduleDue, scheduleMarkSent } from "./db/repo.ts";
+import { claimScheduled, scheduleDue, scheduleMarkSent } from "./db/repo.ts";
 import { leaderboard, leaderboardText } from "./members.ts";
 import { notifyOperators } from "./notify.ts";
 import { say } from "./moderation.ts";
@@ -34,12 +34,19 @@ export async function runScheduled(
   rt: Runtime,
   limit = 10,
 ): Promise<{ sent: number; failed: number; disabled: number }> {
-  const due = await scheduleDue(rt.db, rt.now(), limit);
+  // 原子认领：cron 与 Node 长轮询共用同一张表，纯 SELECT 会让两个运行时
+  // 各发一遍。逐行按 next_at 做 CAS，谁改到行谁发送；认领把 next_at 推进
+  // 5 分钟，发送中途崩溃的行最多延迟 5 分钟重试。
+  const nowMs = rt.now();
+  const due = await scheduleDue(rt.db, nowMs, limit);
   let sent = 0;
   let failed = 0;
   let disabled = 0;
 
   for (const row of due) {
+    const token = `${nowMs}:${Math.random().toString(36).slice(2, 10)}`;
+    const claimed = await claimScheduled(rt.db, row.id, row.nextAt, token, nowMs);
+    if (!claimed) continue; // 另一个运行时认领了这一行
     // `{{top}}` in a scheduled message is a placeholder, not literal text: it
     // turns any daily slot into "post the leaderboard" without a new feature.
     // 消息按 HTML 发送：管理员写的正文与 {{top}} 展开的成员名都可能含 <、&，

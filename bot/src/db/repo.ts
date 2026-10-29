@@ -325,14 +325,21 @@ export type ChatStats = {
   perDay: { day: string; kind: string; n: number }[];
 };
 
-export async function chatStats(db: Db, chatId: number, sinceMs: number): Promise<ChatStats> {
+export async function chatStats(
+  db: Db,
+  chatId: number,
+  sinceMs: number,
+  tzOffsetMinutes = 0,
+): Promise<ChatStats> {
   const totals = (await db
     .select({ kind: events.kind, n: sql<number>`count(*)` })
     .from(events)
     .where(and(eq(events.chatId, chatId), gte(events.at, sinceMs)))
     .groupBy(events.kind)) as { kind: string; n: number }[];
 
-  const day = sql<string>`date(${events.at} / 1000, 'unixepoch')`;
+  // 日界按部署时区算（与 dayKey / 热词 / 成员榜一致）：此前用 UTC 分组，
+  // "今天"筛选却按 tzOffset 判——非 UTC 部署跨午夜时段今天行错位或为空。
+  const day = sql<string>`date((${events.at} + ${tzOffsetMinutes * 60_000}) / 1000, 'unixepoch')`;
   const perDay = (await db
     .select({ day, kind: events.kind, n: sql<number>`count(*)` })
     .from(events)
@@ -496,14 +503,54 @@ export async function scheduleDue(db: Db, nowMs: number, limit = 10): Promise<Sc
     .limit(limit)) as ScheduledRow[];
 }
 
+/**
+ * 尝试认领一条到期定时消息；返回 true 表示"这轮归我"。
+ *
+ * cron 与 Node 长轮询共用同一张表，此前 runScheduled 纯 SELECT 会让两个运行时
+ * 各发一遍。认领 = 条件 UPDATE 写入本进程的随机 token，再读回比对——两个驱动
+ * （D1 / sqlite-proxy）的 run() 返回形状不同，读回是唯一跨驱动的所有权判定。
+ * next_at 同时推进到地平线（now + 5 分钟）：持有人崩溃后，过期认领（claimed_at
+ * 超过 5 分钟）可被别的运行时接管，消息最多延迟 5 分钟重试（at-least-once）。
+ * 成功/暂时失败由 scheduleMarkSent 覆写并清空 token；永久失败同路径禁用。
+ */
+export async function claimScheduled(
+  db: Db,
+  id: number,
+  expectedNextAt: number,
+  token: string,
+  nowMs: number,
+): Promise<boolean> {
+  const claimUntil = nowMs + 5 * 60_000;
+  const staleBefore = nowMs - 5 * 60_000;
+  await db
+    .update(scheduledMessages)
+    .set({ claimToken: token, claimedAt: nowMs, nextAt: claimUntil })
+    .where(
+      and(
+        eq(scheduledMessages.id, id),
+        eq(scheduledMessages.nextAt, expectedNextAt),
+        sql`(${scheduledMessages.claimToken} = '' OR ${scheduledMessages.claimedAt} < ${staleBefore})`,
+      ),
+    )
+    .run();
+  const rows = (await db
+    .select({ claimToken: scheduledMessages.claimToken })
+    .from(scheduledMessages)
+    .where(eq(scheduledMessages.id, id))) as Array<{ claimToken: string }>;
+  return rows[0]?.claimToken === token;
+}
+
 export async function scheduleMarkSent(db: Db, id: number, nextAt: number | null, error = ""): Promise<void> {
   if (nextAt === null) {
-    await db.update(scheduledMessages).set({ enabled: 0, lastError: error.slice(0, 200) }).where(eq(scheduledMessages.id, id));
+    await db
+      .update(scheduledMessages)
+      .set({ enabled: 0, lastError: error.slice(0, 200), claimToken: "" })
+      .where(eq(scheduledMessages.id, id));
     return;
   }
   await db
     .update(scheduledMessages)
-    .set({ nextAt, sent: sql`${scheduledMessages.sent} + 1`, lastError: error.slice(0, 200) })
+    .set({ nextAt, sent: sql`${scheduledMessages.sent} + 1`, lastError: error.slice(0, 200), claimToken: "" })
     .where(eq(scheduledMessages.id, id));
 }
 
@@ -933,6 +980,14 @@ export async function rssPollable(db: Db, limit = 20): Promise<RssFeedRow[]> {
     .from(rssFeeds)
     .orderBy(rssFeeds.at, rssFeeds.id)
     .limit(Math.max(1, Math.min(limit, 200)))) as RssFeedRow[];
+}
+
+/**
+ * 只推进水位线：pollOne 每成功投递一条就落一次，中途崩溃/断电不会整批重发
+ * （此前是整批发完才落库，失败窗口 = 整批重复）。其余字段交给收尾的 rssFeedMark。
+ */
+export async function rssFeedWatermark(db: Db, id: number, lastKey: string): Promise<void> {
+  await db.update(rssFeeds).set({ lastKey }).where(eq(rssFeeds.id, id));
 }
 
 export async function rssFeedMark(
