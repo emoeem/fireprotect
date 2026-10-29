@@ -12,6 +12,7 @@
  * loop and header handling.
  */
 import Parser from "rss-parser";
+import { guardedFetch } from "./url-guard.ts";
 import { errorText, type FetchLike } from "./telegram.ts";
 import type { FeedItem, FeedLike, FeedParser } from "./rss.ts";
 
@@ -58,10 +59,11 @@ export function nodeFeedParser(options: NodeFeedParserOptions = {}): FeedParser 
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let xml = "";
     try {
-      const response = await doFetch(url, {
+      // 每一跳重过 publicHttpUrl（guardedFetch）：follow 会静默跳进内网/元数据地址。
+      const response = await guardedFetch(url, {
         headers: { "user-agent": options.userAgent ?? DEFAULT_USER_AGENT, accept: ACCEPT },
-        redirect: "follow",
         signal: controller.signal,
+        fetchImpl: doFetch,
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       xml = await response.text();

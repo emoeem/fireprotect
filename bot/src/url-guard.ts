@@ -52,3 +52,36 @@ export function publicHttpUrl(input: string): string | null {
 
   return candidate;
 }
+
+/**
+ * 受控重定向的出站 fetch：每一跳都重新过 publicHttpUrl——redirect: "follow"
+ * 会静默跟随 302，公网 URL 一跳到 127.0.0.1 / 169.254.169.254（云元数据），
+ * 首跳守卫就被绕过了。手动跟跳 + 逐跳复检（上限 5 跳）封住这条 SSRF 面。
+ */
+/** Node 侧依赖注入的 fetch 只收字符串 URL（与全局 fetch 的宽签名兼容）。 */
+export type UrlFetch = (input: string, init?: RequestInit) => Promise<Response>;
+
+export async function guardedFetch(
+  url: string,
+  init: Omit<RequestInit, "redirect"> & { fetchImpl?: UrlFetch },
+): Promise<Response> {
+  const doFetch = init.fetchImpl ?? fetch;
+  const { fetchImpl: _ignored, ...rest } = init;
+  let current = publicHttpUrl(url);
+  if (!current) throw new Error(`不接受的地址：${url}`);
+  for (let hops = 0; hops <= 5; hops += 1) {
+    const response = await doFetch(current, { ...rest, redirect: "manual" });
+    if (response.status < 300 || response.status >= 400) return response;
+    const location = response.headers.get("location");
+    if (!location) return response;
+    let next: string | null = null;
+    try {
+      next = publicHttpUrl(new URL(location, current).toString());
+    } catch {
+      next = null;
+    }
+    if (!next) throw new Error(`重定向目标被拒：${location.slice(0, 120)}`);
+    current = next;
+  }
+  throw new Error("重定向次数过多");
+}

@@ -19,7 +19,7 @@ import { LRUCache } from "lru-cache";
 import { decode } from "he";
 import type { FetchLike } from "../external/http.ts";
 import { detectSite, type SiteId } from "./sites.ts";
-import { publicHttpUrl } from "../url-guard.ts";
+import { publicHttpUrl, guardedFetch } from "../url-guard.ts";
 
 export const PREVIEW_TIMEOUT_MS = 3_000;
 export const PREVIEW_MAX_BYTES = 400 * 1024;
@@ -83,14 +83,14 @@ export class Previewer {
   }
 
   private async request(url: string): Promise<Preview | PreviewFailure> {
-    const doFetch = this.deps.fetchImpl ?? ((input: string, init?: RequestInit) => fetch(input, init));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const response = await doFetch(url, {
+      // 每一跳重过 publicHttpUrl（guardedFetch）：follow 会静默跳进内网/元数据地址。
+      const response = await guardedFetch(url, {
         headers: { "user-agent": UA, accept: "text/html,application/xhtml+xml", "accept-language": "zh-CN,zh;q=0.9" },
-        redirect: "follow",
         signal: controller.signal,
+        fetchImpl: this.deps.fetchImpl,
       });
       if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
       const html = await readCapped(response, PREVIEW_MAX_BYTES);

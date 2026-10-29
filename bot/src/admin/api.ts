@@ -539,7 +539,7 @@ async function route(
       chats = mine;
       const since = rt.now() - 7 * 86_400_000;
       for (const chat of mine) {
-        const stats = await chatStats(rt.db, chat.chatId, since);
+        const stats = await chatStats(rt.db, chat.chatId, since, rt.tzOffset);
         for (const [kind, n] of Object.entries(stats.totals))
           totals[kind] = (totals[kind] ?? 0) + n;
       }
@@ -596,7 +596,7 @@ async function route(
         chatId,
         day,
         config,
-        stats: await chatStats(rt.db, chatId, rt.now() - 30 * 86_400_000),
+        stats: await chatStats(rt.db, chatId, rt.now() - 30 * 86_400_000, rt.tzOffset),
         events: await recentEvents(rt.db, chatId, 20),
         notes: await noteList(rt.db, chatId),
         filters: await filterList(rt.db, chatId),
@@ -715,6 +715,14 @@ async function route(
     if (memberAction && request.method === "POST") {
       const userId = Number(memberAction[1]);
       const action = memberAction[2];
+      // 与群内命令的 guardTarget 同一条规则：机器人自己、管理员都不可作为
+      // 处置对象——此前控制台这条路完全没有守卫。
+      if (!userId || String(userId) === rt.api.botId) {
+        return json({ error: "不能对机器人自己这么做" }, 400);
+      }
+      if (await rt.admin.isAdmin(chatId, userId)) {
+        return json({ error: "不能对管理员这么做" }, 400);
+      }
       let res;
       if (action === "mute") {
         res = await rt.api.call("restrictChatMember", {

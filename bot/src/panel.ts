@@ -162,7 +162,7 @@ export async function renderScreen(rt: Runtime, chatId: number, screen: string):
     }
     case "stats": {
       const since = rt.now() - 7 * 86_400_000;
-      const stats = await chatStats(rt.db, chatId, since);
+      const stats = await chatStats(rt.db, chatId, since, rt.tzOffset);
       const recent = await recentEvents(rt.db, chatId, 5);
       const label: Record<string, string> = { delete: "删除", mute: "禁言", ban: "封禁", kick: "移出", warn: "警告", verify: "验证", join: "进群", leave: "退群", external: "外部" };
       const totals = Object.entries(stats.totals).filter(([, n]) => n > 0).map(([kind, n]) => `${label[kind] ?? kind} ${n}`).join("｜") || "无记录";

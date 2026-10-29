@@ -32,7 +32,7 @@ export const KIND_LABELS = LABEL;
 export async function statsText(rt: Runtime, chatId: number, days: number): Promise<string> {
   const span = Math.max(1, Math.min(days, 90));
   const since = rt.now() - span * 86_400_000;
-  const stats = await chatStats(rt.db, chatId, since);
+  const stats = await chatStats(rt.db, chatId, since, rt.tzOffset);
   const banTotal = await banCount(rt.db).catch(() => 0);
   const recent = await recentEvents(rt.db, chatId, 5).catch(() => []);
 

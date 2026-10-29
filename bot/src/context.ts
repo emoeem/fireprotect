@@ -246,9 +246,19 @@ export function createRuntime(env: Env, deps: RuntimeDeps & { sqlite: SqliteHand
   return runtime;
 }
 
-/** Awaited by the entry points so a fresh database exists before traffic. */
+/**
+ * Awaited by the entry points so a fresh database exists before traffic.
+ *
+ * 按数据库句柄记一次：worker.ts 在每个 /api/* 请求与 cron tick 前都 await 它，
+ * 而 migrate 每次要建 _migrations + 逐条 select（约 9 次 D1 往返）。Worker 的
+ * D1 绑定随 isolate 存活，整个生命周期只会 migrate 一遍；新 isolate / 新句柄
+ * 自会重跑（测试里的每个内存库也因此互不串扰——不能按进程全局标记）。
+ */
+const schemaReadyByDb = new WeakSet<SqliteHandle>();
 export async function ensureSchema(sql: SqliteHandle): Promise<void> {
+  if (schemaReadyByDb.has(sql)) return;
   await migrate(sql);
+  schemaReadyByDb.add(sql);
 }
 
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@
  *    dimension probe already are.
  */
 import { spawn } from "node:child_process";
+import { guardedFetch } from "../url-guard.ts";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
@@ -118,7 +119,8 @@ async function fetchBytes(url: string, limit: number): Promise<Uint8Array | null
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetch(url, { signal: controller.signal, headers: { "user-agent": "Mozilla/5.0" } });
+    // 缩略图/预览字节同样走逐跳复检的受控 fetch（undici 默认 follow，首跳守卫可被 302 绕过）。
+    const response = await guardedFetch(url, { signal: controller.signal, headers: { "user-agent": "Mozilla/5.0" } });
     if (!response.ok) return null;
     const buffer = new Uint8Array(await response.arrayBuffer());
     return buffer.byteLength > limit ? null : buffer;
