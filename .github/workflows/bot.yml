@@ -29,7 +29,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 24, not 22: `--experimental-test-coverage` changed its report format
+          # between the two, and the coverage gate parses that table. The package
+          # only requires >=22, and the same major as local is what makes a green
+          # local run mean a green CI run.
+          node-version: 24
           cache: npm
           cache-dependency-path: |
             bot/package-lock.json
