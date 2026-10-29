@@ -7,8 +7,28 @@
  * privilege-escalation path inside the group.
  */
 import { PERMS_MEMBER, PERMS_MUTED, type Right, type Runtime } from "../context.ts";
-import { LOCK_KINDS, SETTABLE, coerceField, describeConfig, lockLabel, parseKeywords, type ChatConfig, type LockKind } from "../rules.ts";
-import { ban, deleteMessages, kick, logAction, record, recordBan, restrict, say, unban, unmute } from "../moderation.ts";
+import {
+  LOCK_KINDS,
+  SETTABLE,
+  coerceField,
+  describeConfig,
+  lockLabel,
+  parseKeywords,
+  type ChatConfig,
+  type LockKind,
+} from "../rules.ts";
+import {
+  ban,
+  deleteMessages,
+  kick,
+  logAction,
+  record,
+  recordBan,
+  restrict,
+  say,
+  unban,
+  unmute,
+} from "../moderation.ts";
 import { MATCH_MODES, type FilterMatchMode } from "../replies.ts";
 import { inNightWindow } from "../nightmode.ts";
 import { sendPanel } from "../panel.ts";
@@ -29,6 +49,7 @@ import {
   userEvents,
   warnDec,
   warnInc,
+  warnReset,
 } from "../db/repo.ts";
 import { describeStrike, strikeAt } from "../ladder.ts";
 import { KIND_LABELS } from "../stats.ts";
@@ -50,7 +71,14 @@ import { visionSubject } from "../ai/vision.ts";
 import { inspectPattern } from "../keywords.ts";
 import { aiUsageGet, wordDayTotals, wordTop } from "../db/repo.ts";
 import { dayKey, flushWords } from "../ai/words.ts";
-import { allowParse, enqueueParse, parseBlockedNotice, parseBreakerFor, parseHostOf, runParseJob } from "../parse/service.ts";
+import {
+  allowParse,
+  enqueueParse,
+  parseBlockedNotice,
+  parseBreakerFor,
+  parseHostOf,
+  runParseJob,
+} from "../parse/service.ts";
 import { detectSite, extractUrls, parseUrl } from "../parse/sites.ts";
 import type { TgMessage, TgUser } from "../types.ts";
 
@@ -93,69 +121,579 @@ export type CommandSpec = {
 };
 
 export const COMMAND_SPEC: CommandSpec[] = [
-  { name: "id", public: true, usage: "看自己的数字 ID", sample: "/id", invalid: "/id 乱写", boundary: "/id 999999999999", invalidExpect: /你的 ID|你的 Telegram ID/ },
-  { name: "start", public: true, usage: "命令列表", sample: "/start", invalid: "/start x", boundary: "/start " + "x".repeat(200), invalidExpect: /焰卫|命令/ },
-  { name: "help", public: true, usage: "命令列表", sample: "/help", invalid: "/help 乱写", boundary: "/help " + "x".repeat(200), invalidExpect: /焰卫|命令/ },
-  { name: "rules", public: true, usage: "本群规则", sample: "/rules", invalid: "/rules x", boundary: "/rules " + "x".repeat(200), invalidExpect: /新人验证|拦截/ },
-  { name: "get", public: true, usage: "名字", sample: "/get 不存在", invalid: "/get", boundary: "/get " + "名".repeat(200), invalidExpect: /用法|没有叫/ },
-  { name: "notes", public: true, usage: "本群保存的说明", sample: "/notes", invalid: "/notes x", boundary: "/notes " + "x".repeat(200), invalidExpect: /还没有|条/ },
-  { name: "stats", readOnly: true, usage: "[天数]", sample: "/stats", invalid: "/stats abc", boundary: "/stats 99999", invalidExpect: /最近 \d+ 天|没有记录/ },
-  { name: "login", readOnly: true, usage: "<6 位登录码>", sample: "/login 000000", invalid: "/login abc", boundary: "/login 999999999999", invalidExpect: /用法|码不对|已批准/ },
-  { name: "actions", readOnly: true, usage: "[条数]", sample: "/actions", invalid: "/actions abc", boundary: "/actions 999", invalidExpect: /用法|最近/ },
-  { name: "top", readOnly: true, usage: "[人数]", sample: "/top", invalid: "/top abc", boundary: "/top 999", invalidExpect: /今日发言榜|还没有/ },
-  { name: "warns", readOnly: true, usage: "<用户ID 或 回复消息>", sample: "/warns 500", invalid: "/warns abc", boundary: "/warns 999999999999", invalidExpect: /用法|没有找到/ },
+  {
+    name: "id",
+    public: true,
+    usage: "看自己的数字 ID",
+    sample: "/id",
+    invalid: "/id 乱写",
+    boundary: "/id 999999999999",
+    invalidExpect: /你的 ID|你的 Telegram ID/,
+  },
+  {
+    name: "start",
+    public: true,
+    usage: "命令列表",
+    sample: "/start",
+    invalid: "/start x",
+    boundary: "/start " + "x".repeat(200),
+    invalidExpect: /焰卫|命令/,
+  },
+  {
+    name: "help",
+    public: true,
+    usage: "命令列表",
+    sample: "/help",
+    invalid: "/help 乱写",
+    boundary: "/help " + "x".repeat(200),
+    invalidExpect: /焰卫|命令/,
+  },
+  {
+    name: "rules",
+    public: true,
+    usage: "本群规则",
+    sample: "/rules",
+    invalid: "/rules x",
+    boundary: "/rules " + "x".repeat(200),
+    invalidExpect: /新人验证|拦截/,
+  },
+  {
+    name: "get",
+    public: true,
+    usage: "名字",
+    sample: "/get 不存在",
+    invalid: "/get",
+    boundary: "/get " + "名".repeat(200),
+    invalidExpect: /用法|没有叫/,
+  },
+  {
+    name: "notes",
+    public: true,
+    usage: "本群保存的说明",
+    sample: "/notes",
+    invalid: "/notes x",
+    boundary: "/notes " + "x".repeat(200),
+    invalidExpect: /还没有|条/,
+  },
+  {
+    name: "stats",
+    readOnly: true,
+    usage: "[天数]",
+    sample: "/stats",
+    invalid: "/stats abc",
+    boundary: "/stats 99999",
+    invalidExpect: /最近 \d+ 天|没有记录/,
+  },
+  {
+    name: "login",
+    readOnly: true,
+    usage: "<6 位登录码>",
+    sample: "/login 000000",
+    invalid: "/login abc",
+    boundary: "/login 999999999999",
+    invalidExpect: /用法|码不对|已批准/,
+  },
+  {
+    name: "actions",
+    readOnly: true,
+    usage: "[条数]",
+    sample: "/actions",
+    invalid: "/actions abc",
+    boundary: "/actions 999",
+    invalidExpect: /用法|最近/,
+  },
+  {
+    name: "top",
+    readOnly: true,
+    usage: "[人数]",
+    sample: "/top",
+    invalid: "/top abc",
+    boundary: "/top 999",
+    invalidExpect: /今日发言榜|还没有/,
+  },
+  {
+    name: "warns",
+    readOnly: true,
+    usage: "<用户ID 或 回复消息>",
+    sample: "/warns 500",
+    invalid: "/warns abc",
+    boundary: "/warns 999999999999",
+    invalidExpect: /用法|没有找到/,
+  },
 
-  { name: "ban", right: "can_restrict_members", needsReply: true, mutates: true, usage: "[分钟]", sample: "/ban 10", invalid: "/ban abc", boundary: "/ban 999999", invalidExpect: /请回复|没指定对象|分钟数/ },
-  { name: "mute", right: "can_restrict_members", needsReply: true, mutates: true, usage: "[分钟]", sample: "/mute 5", invalid: "/mute abc", boundary: "/mute 999999", invalidExpect: /请回复|没指定对象|分钟数/ },
-  { name: "kick", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/kick", invalid: "/kick abc", boundary: "/kick 999999999", invalidExpect: /请回复|没指定对象/ },
-  { name: "unban", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/unban", invalid: "/unban abc", boundary: "/unban 999999999", invalidExpect: /请回复|没指定对象/ },
-  { name: "warn", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/warn", invalid: "/warn abc", boundary: "/warn 999999", invalidExpect: /请回复|要警告/ },
-  { name: "unwarn", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/unwarn", invalid: "/unwarn abc", boundary: "/unwarn 999999", invalidExpect: /请回复|剩/ },
-  { name: "verify", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/verify", invalid: "/verify abc", boundary: "/verify 999999999", invalidExpect: /请回复|放行/ },
-  { name: "del", right: "can_delete_messages", needsReply: true, mutates: true, usage: "", sample: "/del", invalid: "/del abc", boundary: "/del 999999", invalidExpect: /请回复|删除/ },
-  { name: "purge", right: "can_delete_messages", needsReply: true, mutates: true, usage: "[数量]", sample: "/purge 5", invalid: "/purge abc", boundary: "/purge 99999", invalidExpect: /请回复|删除|批量/ },
-  { name: "pin", right: "can_pin_messages", needsReply: true, mutates: true, usage: "", sample: "/pin", invalid: "/pin abc", boundary: "/pin 999999", invalidExpect: /请回复|已置顶/ },
-  { name: "unpin", right: "can_pin_messages", mutates: true, usage: "", sample: "/unpin", invalid: "/unpin abc", boundary: "/unpin 999999", invalidExpect: /已取消置顶|没成功|请回复/ },
-  { name: "lock", right: "can_restrict_members", mutates: true, usage: "[类型|all]", sample: "/lock", invalid: "/lock 不存在的类型", boundary: "/lock all", invalidExpect: /不认识的类型|全群/ },
-  { name: "unlock", right: "can_restrict_members", mutates: true, usage: "[类型|all]", sample: "/unlock", invalid: "/unlock 不存在的类型", boundary: "/unlock all", invalidExpect: /不认识的类型|解除/ },
-  { name: "set", right: "can_change_info", mutates: true, usage: "字段 值", sample: "/set maxLength 800", invalid: "/set 不存在的字段 1", boundary: "/set warnLimit 99999", invalidExpect: /未知字段|没成功/ },
-  { name: "captcha", right: "can_change_info", mutates: true, usage: "on|off|button|math|question|image|subscribe", sample: "/captcha on", invalid: "/captcha 乱写", boundary: "/captcha subscribe", invalidExpect: /用法|已|频道/ },
-  { name: "keywords", right: "can_change_info", mutates: true, usage: "add 词1,词2 | del 词 | list", sample: "/keywords add 测试词", invalid: "/keywords 乱写", boundary: "/keywords add " + "词".repeat(120), invalidExpect: /用法|已加入|关键词/ },
-  { name: "logs", right: "can_change_info", mutates: true, usage: "频道ID|off", sample: "/logs off", invalid: "/logs 不是数字", boundary: "/logs -100" + "9".repeat(20), invalidExpect: /请给频道|已关闭|记录/ },
-  { name: "nightmode", right: "can_change_info", mutates: true, usage: "on|off [HH:MM-HH:MM]", sample: "/nightmode on", invalid: "/nightmode 25:99-99:99", boundary: "/nightmode 23:59-00:01", invalidExpect: /用法|夜间模式/ },
-  { name: "save", right: "can_change_info", mutates: true, usage: "名字 内容", sample: "/save 规则 不许发广告", invalid: "/save", boundary: "/save 长名" + "字".repeat(60) + " 内容", invalidExpect: /用法|已保存/ },
-  { name: "delnote", right: "can_change_info", mutates: true, usage: "名字", sample: "/delnote 规则", invalid: "/delnote", boundary: "/delnote " + "名".repeat(200), invalidExpect: /用法|已删除/ },
-  { name: "filter", right: "can_change_info", mutates: true, usage: "add exact|prefix|regex 触发词 => 回复", sample: "/filter add exact 你好 => 你也好", invalid: "/filter add", boundary: "/filter add regex ^" + "a".repeat(190) + "$ => 太长", invalidExpect: /格式|用法|匹配方式|触发词|回复内容|已添加/ },
-  { name: "filters", readOnly: true, usage: "", sample: "/filters", invalid: "/filters x", boundary: "/filters " + "x".repeat(200), invalidExpect: /还没有|#\d/ },
-  { name: "delfilter", right: "can_change_info", mutates: true, usage: "ID", sample: "/delfilter 1", invalid: "/delfilter abc", boundary: "/delfilter 999999999", invalidExpect: /用法|已删除/ },
-  { name: "schedule", right: "can_change_info", mutates: true, usage: "秒数 文本 | list | off ID", sample: "/schedule 3600 提醒喝水", invalid: "/schedule", boundary: "/schedule 99999999 文本", invalidExpect: /用法|已添加|定时/ },
+  {
+    name: "ban",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "[分钟]",
+    sample: "/ban 10",
+    invalid: "/ban abc",
+    boundary: "/ban 999999",
+    invalidExpect: /请回复|没指定对象|分钟数/,
+  },
+  {
+    name: "mute",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "[分钟]",
+    sample: "/mute 5",
+    invalid: "/mute abc",
+    boundary: "/mute 999999",
+    invalidExpect: /请回复|没指定对象|分钟数/,
+  },
+  {
+    name: "kick",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/kick",
+    invalid: "/kick abc",
+    boundary: "/kick 999999999",
+    invalidExpect: /请回复|没指定对象/,
+  },
+  {
+    name: "unban",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/unban",
+    invalid: "/unban abc",
+    boundary: "/unban 999999999",
+    invalidExpect: /请回复|没指定对象/,
+  },
+  {
+    name: "warn",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/warn",
+    invalid: "/warn abc",
+    boundary: "/warn 999999",
+    invalidExpect: /请回复|要警告/,
+  },
+  {
+    name: "unwarn",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/unwarn",
+    invalid: "/unwarn abc",
+    boundary: "/unwarn 999999",
+    invalidExpect: /请回复|剩/,
+  },
+  {
+    name: "verify",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/verify",
+    invalid: "/verify abc",
+    boundary: "/verify 999999999",
+    invalidExpect: /请回复|放行/,
+  },
+  {
+    name: "del",
+    right: "can_delete_messages",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/del",
+    invalid: "/del abc",
+    boundary: "/del 999999",
+    invalidExpect: /请回复|删除/,
+  },
+  {
+    name: "purge",
+    right: "can_delete_messages",
+    needsReply: true,
+    mutates: true,
+    usage: "[数量]",
+    sample: "/purge 5",
+    invalid: "/purge abc",
+    boundary: "/purge 99999",
+    invalidExpect: /请回复|删除|批量/,
+  },
+  {
+    name: "pin",
+    right: "can_pin_messages",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/pin",
+    invalid: "/pin abc",
+    boundary: "/pin 999999",
+    invalidExpect: /请回复|已置顶/,
+  },
+  {
+    name: "unpin",
+    right: "can_pin_messages",
+    mutates: true,
+    usage: "",
+    sample: "/unpin",
+    invalid: "/unpin abc",
+    boundary: "/unpin 999999",
+    invalidExpect: /已取消置顶|没成功|请回复/,
+  },
+  {
+    name: "lock",
+    right: "can_restrict_members",
+    mutates: true,
+    usage: "[类型|all]",
+    sample: "/lock",
+    invalid: "/lock 不存在的类型",
+    boundary: "/lock all",
+    invalidExpect: /不认识的类型|全群/,
+  },
+  {
+    name: "unlock",
+    right: "can_restrict_members",
+    mutates: true,
+    usage: "[类型|all]",
+    sample: "/unlock",
+    invalid: "/unlock 不存在的类型",
+    boundary: "/unlock all",
+    invalidExpect: /不认识的类型|解除/,
+  },
+  {
+    name: "set",
+    right: "can_change_info",
+    mutates: true,
+    usage: "字段 值",
+    sample: "/set maxLength 800",
+    invalid: "/set 不存在的字段 1",
+    boundary: "/set warnLimit 99999",
+    invalidExpect: /未知字段|没成功/,
+  },
+  {
+    name: "captcha",
+    right: "can_change_info",
+    mutates: true,
+    usage: "on|off|button|math|question|image|subscribe",
+    sample: "/captcha on",
+    invalid: "/captcha 乱写",
+    boundary: "/captcha subscribe",
+    invalidExpect: /用法|已|频道/,
+  },
+  {
+    name: "keywords",
+    right: "can_change_info",
+    mutates: true,
+    usage: "add 词1,词2 | del 词 | list",
+    sample: "/keywords add 测试词",
+    invalid: "/keywords 乱写",
+    boundary: "/keywords add " + "词".repeat(120),
+    invalidExpect: /用法|已加入|关键词/,
+  },
+  {
+    name: "logs",
+    right: "can_change_info",
+    mutates: true,
+    usage: "频道ID|off",
+    sample: "/logs off",
+    invalid: "/logs 不是数字",
+    boundary: "/logs -100" + "9".repeat(20),
+    invalidExpect: /请给频道|已关闭|记录/,
+  },
+  {
+    name: "nightmode",
+    right: "can_change_info",
+    mutates: true,
+    usage: "on|off [HH:MM-HH:MM]",
+    sample: "/nightmode on",
+    invalid: "/nightmode 25:99-99:99",
+    boundary: "/nightmode 23:59-00:01",
+    invalidExpect: /用法|夜间模式/,
+  },
+  {
+    name: "save",
+    right: "can_change_info",
+    mutates: true,
+    usage: "名字 内容",
+    sample: "/save 规则 不许发广告",
+    invalid: "/save",
+    boundary: "/save 长名" + "字".repeat(60) + " 内容",
+    invalidExpect: /用法|已保存/,
+  },
+  {
+    name: "delnote",
+    right: "can_change_info",
+    mutates: true,
+    usage: "名字",
+    sample: "/delnote 规则",
+    invalid: "/delnote",
+    boundary: "/delnote " + "名".repeat(200),
+    invalidExpect: /用法|已删除/,
+  },
+  {
+    name: "filter",
+    right: "can_change_info",
+    mutates: true,
+    usage: "add exact|prefix|regex 触发词 => 回复",
+    sample: "/filter add exact 你好 => 你也好",
+    invalid: "/filter add",
+    boundary: "/filter add regex ^" + "a".repeat(190) + "$ => 太长",
+    invalidExpect: /格式|用法|匹配方式|触发词|回复内容|已添加/,
+  },
+  {
+    name: "filters",
+    readOnly: true,
+    usage: "",
+    sample: "/filters",
+    invalid: "/filters x",
+    boundary: "/filters " + "x".repeat(200),
+    invalidExpect: /还没有|#\d/,
+  },
+  {
+    name: "delfilter",
+    right: "can_change_info",
+    mutates: true,
+    usage: "ID",
+    sample: "/delfilter 1",
+    invalid: "/delfilter abc",
+    boundary: "/delfilter 999999999",
+    invalidExpect: /用法|已删除/,
+  },
+  {
+    name: "schedule",
+    right: "can_change_info",
+    mutates: true,
+    usage: "秒数 文本 | list | off ID",
+    sample: "/schedule 3600 提醒喝水",
+    invalid: "/schedule",
+    boundary: "/schedule 99999999 文本",
+    invalidExpect: /用法|已添加|定时/,
+  },
   // `/ocr` is gated on can_delete_messages, not on "is an admin": reading text
   // off somebody's image and disposing of it are the same power. A stranger
   // could otherwise reply to a member's screenshot and trigger a punishment.
-  { name: "ocr", right: "can_delete_messages", needsReply: true, usage: "", sample: "/ocr", invalid: "/ocr abc", boundary: "/ocr 999999", invalidExpect: /用法|没有图片/ },
+  {
+    name: "ocr",
+    right: "can_delete_messages",
+    needsReply: true,
+    usage: "",
+    sample: "/ocr",
+    invalid: "/ocr abc",
+    boundary: "/ocr 999999",
+    invalidExpect: /用法|没有图片/,
+  },
   // RSS: subscribing makes the bot fetch a caller-chosen URL from our egress IP,
   // so it sits behind can_change_info like every other group-state change.
-  { name: "sub", right: "can_change_info", mutates: true, usage: "<地址> | list | export", sample: "/sub list", invalid: "/sub 乱写", boundary: "/sub " + "https://e.com/".padEnd(600, "a"), invalidExpect: /地址|用法|订阅|链接/ },
-  { name: "unsub", right: "can_change_info", mutates: true, usage: "#ID 或地址", sample: "/unsub 1", invalid: "/unsub abc", boundary: "/unsub 999999999", invalidExpect: /订阅|用法|没有/ },
-  { name: "unsubthis", right: "can_change_info", needsReply: true, mutates: true, usage: "", sample: "/unsubthis", invalid: "/unsubthis abc", boundary: "/unsubthis 999999", invalidExpect: /回复|订阅|地址/ },
-  { name: "sync", right: "can_change_info", mutates: true, usage: "add @频道 [间隔|instant] | list | on/off @频道 | del @频道", sample: "/sync list", invalid: "/sync add", boundary: "/sync add @ab 1", invalidExpect: /频道|用法|还没有|同步/ },
-  { name: "trust", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/trust", invalid: "/trust abc", boundary: "/trust 999999999", invalidExpect: /请回复|已信任/ },
-  { name: "block", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/block 广告", invalid: "/block", boundary: "/block " + "x".repeat(200), invalidExpect: /请回复|用法|已屏蔽/ },
-  { name: "unblock", right: "can_restrict_members", needsReply: true, mutates: true, usage: "", sample: "/unblock", invalid: "/unblock abc", boundary: "/unblock 999999999", invalidExpect: /请回复|用法|已解除|不在/ },
-  { name: "blocks", right: "can_restrict_members", readOnly: true, usage: "", sample: "/blocks", invalid: "/blocks x", boundary: "/blocks " + "x".repeat(200), invalidExpect: /没有|屏蔽/ },
-  { name: "export", readOnly: true, usage: "", sample: "/export", invalid: "/export x", boundary: "/export " + "x".repeat(200), invalidExpect: /\{"v":1/ },
-  { name: "import", right: "can_change_info", mutates: true, usage: "<JSON>", sample: '/import {"config":{"maxLength":900}}', invalid: "/import 不是json", boundary: '/import {"config":{"maxLength":99999999}}', invalidExpect: /用法|不是合法 JSON|已导入|没导入/ },
-  { name: "panel", public: true, usage: "控制面板（群里只回私聊入口；面板本身按群逐个鉴权）", sample: "/panel", invalid: "/panel x", boundary: "/panel " + "x".repeat(200), invalidExpect: /焰卫|面板|配置/ },
-  { name: "tool", public: true, usage: "工具箱", sample: "/tool", invalid: "/tool x", boundary: "/tool " + "x".repeat(200), invalidExpect: /工具箱/ },
-  { name: "ts", public: true, usage: "1700000000 或 2026-10-28 18:00", sample: "/ts 1700000000", invalid: "/ts 认不出", boundary: "/ts 9999999999999", invalidExpect: /认不出|用法/ },
-  { name: "expand", public: true, usage: "t.me 链接", sample: "/expand https://t.me/telegram", invalid: "/expand 不是链接", boundary: "/expand https://t.me/" + "a".repeat(120), invalidExpect: /展开失败|用法|只认/ },
-  { name: "splitpdf", public: true, needsReply: true, usage: "（回复一个 PDF）", sample: "/splitpdf", invalid: "/splitpdf x", boundary: "/splitpdf " + "x".repeat(200), invalidExpect: /回复一个 PDF|不是 PDF|解析失败|下载失败|只有一页/ },
-  { name: "slice", public: true, needsReply: true, usage: "（回复一张长截图）", sample: "/slice", invalid: "/slice x", boundary: "/slice " + "x".repeat(200), invalidExpect: /自托管|回复一张图片|下载失败|不需要切分|切分/ },
-  { name: "ai", right: "can_change_info", mutates: true, usage: "on|off|status|provider generic|cloud-vision|min 50-100|budget 次/天", sample: "/ai status", invalid: "/ai 乱写", boundary: "/ai min 999", invalidExpect: /用法|图片审核|阈值|视觉/ },
-  { name: "allow", right: "can_change_info", needsReply: true, mutates: true, usage: "（回复广告合作方）", sample: "/allow", invalid: "/allow abc", boundary: "/allow 999999999", invalidExpect: /请回复|白名单|用法/ },
-  { name: "unallow", right: "can_change_info", needsReply: true, mutates: true, usage: "（回复广告合作方）", sample: "/unallow", invalid: "/unallow abc", boundary: "/unallow 999999999", invalidExpect: /请回复|白名单|不在|用法/ },
-  { name: "words", readOnly: true, usage: "[天数]", sample: "/words", invalid: "/words abc", boundary: "/words 999", invalidExpect: /热词|还没有|天/ },
-  { name: "parse", public: true, usage: "链接（或回复一条带链接的消息）", sample: "/parse https://www.bilibili.com/video/BV1GJ411x7h7", invalid: "/parse 乱写", boundary: "/parse https://example.com/" + "a".repeat(200), invalidExpect: /用法|不支持|链接/ },
+  {
+    name: "sub",
+    right: "can_change_info",
+    mutates: true,
+    usage: "<地址> | list | export",
+    sample: "/sub list",
+    invalid: "/sub 乱写",
+    boundary: "/sub " + "https://e.com/".padEnd(600, "a"),
+    invalidExpect: /地址|用法|订阅|链接/,
+  },
+  {
+    name: "unsub",
+    right: "can_change_info",
+    mutates: true,
+    usage: "#ID 或地址",
+    sample: "/unsub 1",
+    invalid: "/unsub abc",
+    boundary: "/unsub 999999999",
+    invalidExpect: /订阅|用法|没有/,
+  },
+  {
+    name: "unsubthis",
+    right: "can_change_info",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/unsubthis",
+    invalid: "/unsubthis abc",
+    boundary: "/unsubthis 999999",
+    invalidExpect: /回复|订阅|地址/,
+  },
+  {
+    name: "sync",
+    right: "can_change_info",
+    mutates: true,
+    usage: "add @频道 [间隔|instant] | list | on/off @频道 | del @频道",
+    sample: "/sync list",
+    invalid: "/sync add",
+    boundary: "/sync add @ab 1",
+    invalidExpect: /频道|用法|还没有|同步/,
+  },
+  {
+    name: "trust",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/trust",
+    invalid: "/trust abc",
+    boundary: "/trust 999999999",
+    invalidExpect: /请回复|已信任/,
+  },
+  {
+    name: "block",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/block 广告",
+    invalid: "/block",
+    boundary: "/block " + "x".repeat(200),
+    invalidExpect: /请回复|用法|已屏蔽/,
+  },
+  {
+    name: "unblock",
+    right: "can_restrict_members",
+    needsReply: true,
+    mutates: true,
+    usage: "",
+    sample: "/unblock",
+    invalid: "/unblock abc",
+    boundary: "/unblock 999999999",
+    invalidExpect: /请回复|用法|已解除|不在/,
+  },
+  {
+    name: "blocks",
+    right: "can_restrict_members",
+    readOnly: true,
+    usage: "",
+    sample: "/blocks",
+    invalid: "/blocks x",
+    boundary: "/blocks " + "x".repeat(200),
+    invalidExpect: /没有|屏蔽/,
+  },
+  {
+    name: "export",
+    readOnly: true,
+    usage: "",
+    sample: "/export",
+    invalid: "/export x",
+    boundary: "/export " + "x".repeat(200),
+    invalidExpect: /\{"v":1/,
+  },
+  {
+    name: "import",
+    right: "can_change_info",
+    mutates: true,
+    usage: "<JSON>",
+    sample: '/import {"config":{"maxLength":900}}',
+    invalid: "/import 不是json",
+    boundary: '/import {"config":{"maxLength":99999999}}',
+    invalidExpect: /用法|不是合法 JSON|已导入|没导入/,
+  },
+  {
+    name: "panel",
+    public: true,
+    usage: "控制面板（群里只回私聊入口；面板本身按群逐个鉴权）",
+    sample: "/panel",
+    invalid: "/panel x",
+    boundary: "/panel " + "x".repeat(200),
+    invalidExpect: /焰卫|面板|配置/,
+  },
+  {
+    name: "tool",
+    public: true,
+    usage: "工具箱",
+    sample: "/tool",
+    invalid: "/tool x",
+    boundary: "/tool " + "x".repeat(200),
+    invalidExpect: /工具箱/,
+  },
+  {
+    name: "ts",
+    public: true,
+    usage: "1700000000 或 2026-10-28 18:00",
+    sample: "/ts 1700000000",
+    invalid: "/ts 认不出",
+    boundary: "/ts 9999999999999",
+    invalidExpect: /认不出|用法/,
+  },
+  {
+    name: "expand",
+    public: true,
+    usage: "t.me 链接",
+    sample: "/expand https://t.me/telegram",
+    invalid: "/expand 不是链接",
+    boundary: "/expand https://t.me/" + "a".repeat(120),
+    invalidExpect: /展开失败|用法|只认/,
+  },
+  {
+    name: "splitpdf",
+    public: true,
+    needsReply: true,
+    usage: "（回复一个 PDF）",
+    sample: "/splitpdf",
+    invalid: "/splitpdf x",
+    boundary: "/splitpdf " + "x".repeat(200),
+    invalidExpect: /回复一个 PDF|不是 PDF|解析失败|下载失败|只有一页/,
+  },
+  {
+    name: "slice",
+    public: true,
+    needsReply: true,
+    usage: "（回复一张长截图）",
+    sample: "/slice",
+    invalid: "/slice x",
+    boundary: "/slice " + "x".repeat(200),
+    invalidExpect: /自托管|回复一张图片|下载失败|不需要切分|切分/,
+  },
+  {
+    name: "ai",
+    right: "can_change_info",
+    mutates: true,
+    usage: "on|off|status|provider generic|cloud-vision|min 50-100|budget 次/天",
+    sample: "/ai status",
+    invalid: "/ai 乱写",
+    boundary: "/ai min 999",
+    invalidExpect: /用法|图片审核|阈值|视觉/,
+  },
+  {
+    name: "allow",
+    right: "can_change_info",
+    needsReply: true,
+    mutates: true,
+    usage: "（回复广告合作方）",
+    sample: "/allow",
+    invalid: "/allow abc",
+    boundary: "/allow 999999999",
+    invalidExpect: /请回复|白名单|用法/,
+  },
+  {
+    name: "unallow",
+    right: "can_change_info",
+    needsReply: true,
+    mutates: true,
+    usage: "（回复广告合作方）",
+    sample: "/unallow",
+    invalid: "/unallow abc",
+    boundary: "/unallow 999999999",
+    invalidExpect: /请回复|白名单|不在|用法/,
+  },
+  {
+    name: "words",
+    readOnly: true,
+    usage: "[天数]",
+    sample: "/words",
+    invalid: "/words abc",
+    boundary: "/words 999",
+    invalidExpect: /热词|还没有|天/,
+  },
+  {
+    name: "parse",
+    public: true,
+    usage: "链接（或回复一条带链接的消息）",
+    sample: "/parse https://www.bilibili.com/video/BV1GJ411x7h7",
+    invalid: "/parse 乱写",
+    boundary: "/parse https://example.com/" + "a".repeat(200),
+    invalidExpect: /用法|不支持|链接/,
+  },
 ];
 
 const COMMAND_RIGHTS: Record<string, Right> = Object.fromEntries(
@@ -204,7 +742,9 @@ export function parseTarget(msg: TgMessage, args: string): Target {
 
 async function guardTarget(rt: Runtime, msg: TgMessage, id: number): Promise<boolean> {
   if (!id) {
-    await say(rt, msg.chat.id, "请回复对方的消息，或写成 /命令 用户ID。", { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, "请回复对方的消息，或写成 /命令 用户ID。", {
+      replyTo: msg.message_id,
+    });
     return false;
   }
   if (String(id) === rt.api.botId) {
@@ -234,10 +774,15 @@ export async function handleCommand(input: CommandInput): Promise<boolean> {
   if (name === "id") {
     const dm = await say(rt, from.id, `你的 Telegram ID 是 ${from.id}。`, { html: false });
     if (!dm.ok && chat.type !== "private") {
-      await say(rt, chat.id, `你的 ID 是 <code>${from.id}</code>。先私聊我发一次 /start，以后只发到私聊。`, {
-        replyTo: msg.message_id,
-        html: true,
-      });
+      await say(
+        rt,
+        chat.id,
+        `你的 ID 是 <code>${from.id}</code>。先私聊我发一次 /start，以后只发到私聊。`,
+        {
+          replyTo: msg.message_id,
+          html: true,
+        },
+      );
     }
     return true;
   }
@@ -248,7 +793,11 @@ export async function handleCommand(input: CommandInput): Promise<boolean> {
       return true;
     }
     if (name === "help") {
-      const view = helpCard(rt.env, { chatId: from.id, title: from.first_name ?? "运营者", miniApp: await miniAppLink(rt) });
+      const view = helpCard(rt.env, {
+        chatId: from.id,
+        title: from.first_name ?? "运营者",
+        miniApp: await miniAppLink(rt),
+      });
       await say(rt, from.id, view.text, { markup: view.markup, html: true });
       return true;
     }
@@ -267,7 +816,16 @@ export async function handleCommand(input: CommandInput): Promise<boolean> {
 
   if (name === "panel") {
     await say(rt, chat.id, "配置面板在私聊里：点下面的链接打开，然后发 /panel。", {
-      markup: { inline_keyboard: [[{ text: "打开私聊", url: `https://t.me/${rt.env.BOT_USERNAME ?? "your_bot"}?start=panel` }]] },
+      markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "打开私聊",
+              url: `https://t.me/${rt.env.BOT_USERNAME ?? "your_bot"}?start=panel`,
+            },
+          ],
+        ],
+      },
       replyTo: msg.message_id,
     });
     return true;
@@ -284,7 +842,11 @@ export async function handleCommand(input: CommandInput): Promise<boolean> {
         config: input.config,
         miniApp: await miniAppLink(rt),
       });
-      await say(rt, chat.id, view.text, { markup: view.markup, html: true, replyTo: msg.message_id });
+      await say(rt, chat.id, view.text, {
+        markup: view.markup,
+        html: true,
+        replyTo: msg.message_id,
+      });
     } else {
       await say(rt, chat.id, "我在。管理员发 /help 打开面板。", { replyTo: msg.message_id });
     }
@@ -322,7 +884,9 @@ export async function handleCommand(input: CommandInput): Promise<boolean> {
     : await rt.admin.isAdmin(chat.id, from.id);
   if (!allowed) {
     if (!READ_ONLY.has(name)) {
-      await say(rt, chat.id, "你没有这个权限（或该命令需要对应群管理权限）。", { replyTo: msg.message_id });
+      await say(rt, chat.id, "你没有这个权限（或该命令需要对应群管理权限）。", {
+        replyTo: msg.message_id,
+      });
     }
     return true;
   }
@@ -435,7 +999,8 @@ async function cmdBan(input: CommandInput): Promise<boolean> {
   }
   if (!(await guardTarget(rt, msg, target.id))) return true;
   const res = await ban(rt, msg.chat.id, target.id, target.minutes);
-  if (res.ok) await report(input, true, target.minutes ? `已封禁 ${target.minutes} 分钟。` : "已封禁。");
+  if (res.ok)
+    await report(input, true, target.minutes ? `已封禁 ${target.minutes} 分钟。` : "已封禁。");
   else await report(input, false, res.error);
   if (res.ok) await recordBan(rt, config, target.id, "管理员手动封禁");
   if (res.ok) {
@@ -484,7 +1049,14 @@ async function cmdKick(input: CommandInput): Promise<boolean> {
   if (!(await guardTarget(rt, msg, target.id))) return true;
   const res = await kick(rt, msg.chat.id, target.id);
   await report(input, res.ok, res.ok ? "已移出，对方可以再进来。" : res.error);
-  if (res.ok) await record(rt, { chatId: msg.chat.id, userId: target.id, kind: "kick", reason: "管理员手动", byId: msg.from?.id });
+  if (res.ok)
+    await record(rt, {
+      chatId: msg.chat.id,
+      userId: target.id,
+      kind: "kick",
+      reason: "管理员手动",
+      byId: msg.from?.id,
+    });
   return true;
 }
 
@@ -508,21 +1080,40 @@ async function cmdWarn(input: CommandInput): Promise<boolean> {
     return true;
   }
   if (!(await guardTarget(rt, msg, target.id))) return true;
-  if (msg.reply_to_message) await deleteMessages(rt, msg.chat.id, [msg.reply_to_message.message_id]);
+  if (msg.reply_to_message)
+    await deleteMessages(rt, msg.chat.id, [msg.reply_to_message.message_id]);
   const count = await warnInc(rt.db, msg.chat.id, target.id, rt.now());
   const strike = strikeAt(count, input.config);
   if (strike && strike.action !== "warn") {
-    if (strike.action === "ban") await ban(rt, msg.chat.id, target.id, strike.minutes);
-    else if (strike.action === "kick") await kick(rt, msg.chat.id, target.id);
+    if (strike.action === "ban") {
+      await ban(rt, msg.chat.id, target.id, strike.minutes);
+      // 与 applyStrike 对齐：封禁要进共享黑名单、警告计数清零——否则
+      // 联邦封禁漏登记、下次违规直接重复最高档。
+      await recordBan(rt, input.config, target.id, `手动警告第 ${count} 次触发`);
+      await warnReset(rt.db, msg.chat.id, target.id).catch(() => undefined);
+    } else if (strike.action === "kick") await kick(rt, msg.chat.id, target.id);
     else await restrict(rt, msg.chat.id, target.id, strike.minutes);
-    await say(rt, msg.chat.id, `警告 ${count} 次：${describeStrike(strike)}。`, { replyTo: msg.message_id });
-  } else {
-    await say(rt, msg.chat.id, `已警告 <code>${target.id}</code>（第 ${count} 次），并删掉那条消息。`, {
+    await say(rt, msg.chat.id, `警告 ${count} 次：${describeStrike(strike)}。`, {
       replyTo: msg.message_id,
-      html: true,
     });
+  } else {
+    await say(
+      rt,
+      msg.chat.id,
+      `已警告 <code>${target.id}</code>（第 ${count} 次），并删掉那条消息。`,
+      {
+        replyTo: msg.message_id,
+        html: true,
+      },
+    );
   }
-  await record(rt, { chatId: msg.chat.id, userId: target.id, kind: "warn", reason: `手动警告第 ${count} 次`, byId: msg.from?.id });
+  await record(rt, {
+    chatId: msg.chat.id,
+    userId: target.id,
+    kind: "warn",
+    reason: `手动警告第 ${count} 次`,
+    byId: msg.from?.id,
+  });
   return true;
 }
 
@@ -530,7 +1121,9 @@ async function cmdUnwarn(input: CommandInput): Promise<boolean> {
   const { rt, msg } = input;
   const target = parseTarget(msg, input.args);
   if (!target.id) {
-    await say(rt, msg.chat.id, "请回复对方的消息，或写成 /unwarn 用户ID。", { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, "请回复对方的消息，或写成 /unwarn 用户ID。", {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   const left = await warnDec(rt.db, msg.chat.id, target.id, rt.now());
@@ -548,7 +1141,13 @@ async function cmdVerify(input: CommandInput): Promise<boolean> {
   await unmute(rt, msg.chat.id, target.id);
   await rt.store.del(`verify:${msg.chat.id}:${target.id}`);
   await trustAdd(rt.db, msg.chat.id, target.id, rt.now()).catch(() => undefined);
-  await record(rt, { chatId: msg.chat.id, userId: target.id, kind: "verify", reason: "管理员手动放行", byId: msg.from?.id });
+  await record(rt, {
+    chatId: msg.chat.id,
+    userId: target.id,
+    kind: "verify",
+    reason: "管理员手动放行",
+    byId: msg.from?.id,
+  });
   const answer = await say(rt, msg.chat.id, "已放行。", { replyTo: msg.message_id });
   if (answer.ok && !config.deleteJoinMessages) return true;
   return true;
@@ -561,7 +1160,12 @@ async function cmdDel(input: CommandInput): Promise<boolean> {
     return true;
   }
   await deleteMessages(rt, msg.chat.id, [msg.reply_to_message.message_id]);
-  await record(rt, { chatId: msg.chat.id, kind: "delete", reason: "管理员删除", byId: msg.from?.id });
+  await record(rt, {
+    chatId: msg.chat.id,
+    kind: "delete",
+    reason: "管理员删除",
+    byId: msg.from?.id,
+  });
   return true;
 }
 
@@ -583,7 +1187,12 @@ async function cmdPurge(input: CommandInput): Promise<boolean> {
   // `deleteMessages` caps at 100 per call; the loop above already respects it.
   const res = await deleteMessages(rt, msg.chat.id, ids);
   if (!res.ok) await say(rt, msg.chat.id, `没成功：${res.error}`, { replyTo: msg.message_id });
-  await record(rt, { chatId: msg.chat.id, kind: "delete", reason: `批量删除 ${ids.length} 条`, byId: msg.from?.id });
+  await record(rt, {
+    chatId: msg.chat.id,
+    kind: "delete",
+    reason: `批量删除 ${ids.length} 条`,
+    byId: msg.from?.id,
+  });
   return true;
 }
 
@@ -621,16 +1230,25 @@ async function cmdLock(input: CommandInput, locking: boolean): Promise<boolean> 
       permissions: locking ? PERMS_MUTED : PERMS_MEMBER,
       use_independent_chat_permissions: true,
     });
-    await report(input, res.ok, res.ok ? (locking ? "全群已禁言，管理员不受影响。" : "已解除全群禁言。") : res.error);
+    await report(
+      input,
+      res.ok,
+      res.ok ? (locking ? "全群已禁言，管理员不受影响。" : "已解除全群禁言。") : res.error,
+    );
     return true;
   }
 
   const requested = arg === "all" ? [...LOCK_KINDS] : arg.split(/[\s,]+/).filter(Boolean);
   const unknown = requested.filter((kind) => !(LOCK_KINDS as readonly string[]).includes(kind));
   if (unknown.length) {
-    await say(rt, msg.chat.id, `不认识的类型：${unknown.join("、")}。可用：${LOCK_KINDS.join(" ")}`, {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      `不认识的类型：${unknown.join("、")}。可用：${LOCK_KINDS.join(" ")}`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
 
@@ -641,10 +1259,16 @@ async function cmdLock(input: CommandInput, locking: boolean): Promise<boolean> 
   }
   const saved = await rt.saveConfig(msg.chat.id, { locks: [...next] });
   const list = [...next].map(lockLabel);
-  await say(rt, msg.chat.id, list.length ? `已拦截：${list.join("、")}` : "内容拦截已全部关闭，只剩关键词。", {
-    replyTo: msg.message_id,
-  });
-  if (saved.error) await say(rt, msg.chat.id, `但保存失败：${saved.error}`, { replyTo: msg.message_id });
+  await say(
+    rt,
+    msg.chat.id,
+    list.length ? `已拦截：${list.join("、")}` : "内容拦截已全部关闭，只剩关键词。",
+    {
+      replyTo: msg.message_id,
+    },
+  );
+  if (saved.error)
+    await say(rt, msg.chat.id, `但保存失败：${saved.error}`, { replyTo: msg.message_id });
   return true;
 }
 
@@ -656,7 +1280,9 @@ async function cmdSet(input: CommandInput): Promise<boolean> {
   const { rt, msg } = input;
   const [field, ...rest] = input.args.trim().split(/\s+/);
   if (!field) {
-    await say(rt, msg.chat.id, "用法：/set 字段 值。字段：" + Object.keys(SETTABLE).join(" "), { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, "用法：/set 字段 值。字段：" + Object.keys(SETTABLE).join(" "), {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   if (field === "keywords") {
@@ -666,26 +1292,45 @@ async function cmdSet(input: CommandInput): Promise<boolean> {
   if (field === "strikes") {
     const value = (rest[0] ?? "").toLowerCase();
     if (!["on", "off"].includes(value)) {
-      await say(rt, msg.chat.id, "用法：/set strikes on|off（on = 1次禁言1h，2次禁言24h，3次封禁）", { replyTo: msg.message_id });
+      await say(
+        rt,
+        msg.chat.id,
+        "用法：/set strikes on|off（on = 1次禁言1h，2次禁言24h，3次封禁）",
+        { replyTo: msg.message_id },
+      );
       return true;
     }
-    const strikes = value === "off" ? [] : [
-      { at: 1, action: "mute" as const, minutes: 60 },
-      { at: 2, action: "mute" as const, minutes: 1440 },
-      { at: 3, action: "ban" as const, minutes: 0 },
-    ];
+    const strikes =
+      value === "off"
+        ? []
+        : [
+            { at: 1, action: "mute" as const, minutes: 60 },
+            { at: 2, action: "mute" as const, minutes: 1440 },
+            { at: 3, action: "ban" as const, minutes: 0 },
+          ];
     const saved = await rt.saveConfig(msg.chat.id, { strikes });
-    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `阶梯制裁已${value === "on" ? "打开" : "关闭（回退到单次处置）"}。`, {
+    await say(
+      rt,
+      msg.chat.id,
+      saved.error
+        ? `没成功：${saved.error}`
+        : `阶梯制裁已${value === "on" ? "打开" : "关闭（回退到单次处置）"}。`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
+    return true;
+  }
+  if (!(field in SETTABLE)) {
+    await say(rt, msg.chat.id, `未知字段。可用：${Object.keys(SETTABLE).join(" ")}`, {
       replyTo: msg.message_id,
     });
     return true;
   }
-  if (!(field in SETTABLE)) {
-    await say(rt, msg.chat.id, `未知字段。可用：${Object.keys(SETTABLE).join(" ")}`, { replyTo: msg.message_id });
-    return true;
-  }
   if (!rest.length) {
-    await say(rt, msg.chat.id, `用法：/set ${field} <${SETTABLE[field]}>`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `用法：/set ${field} <${SETTABLE[field]}>`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
 
@@ -703,9 +1348,14 @@ async function cmdSet(input: CommandInput): Promise<boolean> {
     return true;
   }
   const shown = (saved.config as unknown as Record<string, unknown>)[field];
-  await say(rt, msg.chat.id, `已设置 ${field} = ${Array.isArray(shown) ? shown.join(",") : String(shown)}`, {
-    replyTo: msg.message_id,
-  });
+  await say(
+    rt,
+    msg.chat.id,
+    `已设置 ${field} = ${Array.isArray(shown) ? shown.join(",") : String(shown)}`,
+    {
+      replyTo: msg.message_id,
+    },
+  );
   return true;
 }
 
@@ -713,26 +1363,42 @@ async function cmdCaptcha(input: CommandInput): Promise<boolean> {
   const { rt, msg, config } = input;
   const value = input.args.trim().toLowerCase();
   if (!value) {
-    await say(rt, msg.chat.id, `新人验证现在是 ${config.captcha ? "开" : "关"}（${config.captchaMode}）。用法：/captcha on|off|button|math|question|image|subscribe`, {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      `新人验证现在是 ${config.captcha ? "开" : "关"}（${config.captchaMode}）。用法：/captcha on|off|button|math|question|image|subscribe`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
   if (["on", "off"].includes(value)) {
     const saved = await rt.saveConfig(msg.chat.id, { captcha: value === "on" });
-    await say(rt, msg.chat.id, `新人验证已${saved.config.captcha ? "打开" : "关闭"}。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `新人验证已${saved.config.captcha ? "打开" : "关闭"}。`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   if (["button", "math", "question", "image", "subscribe"].includes(value)) {
     if (value === "subscribe" && !config.captchaChannel.trim()) {
-      await say(rt, msg.chat.id, "先用 /set captchaChannel @频道 设置要订阅的公开频道（机器人需已加入该频道）。", { replyTo: msg.message_id });
+      await say(
+        rt,
+        msg.chat.id,
+        "先用 /set captchaChannel @频道 设置要订阅的公开频道（机器人需已加入该频道）。",
+        { replyTo: msg.message_id },
+      );
       return true;
     }
     const saved = await rt.saveConfig(msg.chat.id, { captcha: true, captchaMode: value });
-    await say(rt, msg.chat.id, `验证方式已切换为 ${saved.config.captchaMode}。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `验证方式已切换为 ${saved.config.captchaMode}。`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
-  await say(rt, msg.chat.id, "用法：/captcha on|off|button|math|question|image|subscribe", { replyTo: msg.message_id });
+  await say(rt, msg.chat.id, "用法：/captcha on|off|button|math|question|image|subscribe", {
+    replyTo: msg.message_id,
+  });
   return true;
 }
 
@@ -742,9 +1408,18 @@ async function cmdKeywords(input: CommandInput): Promise<boolean> {
   const action = (sub ?? "list").toLowerCase();
   if (action === "list" || !sub) {
     const lines: string[] = [];
-    lines.push(config.keywords.length ? `关键词（${config.keywords.length}）：\n${config.keywords.join("\n")}` : "还没有关键词。用法：/keywords add 词1,词2");
-    if (config.keywordPatterns.length) lines.push(`正则（${config.keywordPatterns.length}）：\n${config.keywordPatterns.join("\n")}`);
-    lines.push(`命中动作：${config.keywordAction === "mute" ? "删除并禁言" : config.keywordAction === "record" ? "只记录" : "删除（走阶梯）"}`);
+    lines.push(
+      config.keywords.length
+        ? `关键词（${config.keywords.length}）：\n${config.keywords.join("\n")}`
+        : "还没有关键词。用法：/keywords add 词1,词2",
+    );
+    if (config.keywordPatterns.length)
+      lines.push(
+        `正则（${config.keywordPatterns.length}）：\n${config.keywordPatterns.join("\n")}`,
+      );
+    lines.push(
+      `命中动作：${config.keywordAction === "mute" ? "删除并禁言" : config.keywordAction === "record" ? "只记录" : "删除（走阶梯）"}`,
+    );
     if (config.adWhitelist.length) lines.push(`广告白名单：${config.adWhitelist.length} 人`);
     await say(rt, msg.chat.id, lines.join("\n\n"), { replyTo: msg.message_id });
     return true;
@@ -753,13 +1428,22 @@ async function cmdKeywords(input: CommandInput): Promise<boolean> {
   if (action === "action") {
     const value = (rest[0] ?? "").toLowerCase();
     if (!["delete", "mute", "record"].includes(value)) {
-      await say(rt, msg.chat.id, "用法：/keywords action delete|mute|record", { replyTo: msg.message_id });
+      await say(rt, msg.chat.id, "用法：/keywords action delete|mute|record", {
+        replyTo: msg.message_id,
+      });
       return true;
     }
     const saved = await rt.saveConfig(msg.chat.id, { keywordAction: value });
-    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `关键词命中后：${{ delete: "删除并走阶梯", mute: "删除并禁言", record: "只记录" }[value as "delete"] ?? value}。`, {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      saved.error
+        ? `没成功：${saved.error}`
+        : `关键词命中后：${{ delete: "删除并走阶梯", mute: "删除并禁言", record: "只记录" }[value as "delete"] ?? value}。`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
 
@@ -767,19 +1451,30 @@ async function cmdKeywords(input: CommandInput): Promise<boolean> {
     const mode = (rest[0] ?? "list").toLowerCase();
     const pattern = rest.slice(1).join(" ").trim();
     if (mode === "list") {
-      await say(rt, msg.chat.id, config.keywordPatterns.length ? `正则（${config.keywordPatterns.length}）：\n${config.keywordPatterns.join("\n")}` : "还没有正则。用法：/keywords regex add 加\\s*V", {
-        replyTo: msg.message_id,
-      });
+      await say(
+        rt,
+        msg.chat.id,
+        config.keywordPatterns.length
+          ? `正则（${config.keywordPatterns.length}）：\n${config.keywordPatterns.join("\n")}`
+          : "还没有正则。用法：/keywords regex add 加\\s*V",
+        {
+          replyTo: msg.message_id,
+        },
+      );
       return true;
     }
     if (mode === "add") {
       if (!pattern) {
-        await say(rt, msg.chat.id, "用法：/keywords regex add 正则（例如 加\\s*[Vv]）", { replyTo: msg.message_id });
+        await say(rt, msg.chat.id, "用法：/keywords regex add 正则（例如 加\\s*[Vv]）", {
+          replyTo: msg.message_id,
+        });
         return true;
       }
       const check = inspectPattern(pattern);
       if (!check.ok) {
-        await say(rt, msg.chat.id, `这个正则没通过安全检查：${check.reason}`, { replyTo: msg.message_id });
+        await say(rt, msg.chat.id, `这个正则没通过安全检查：${check.reason}`, {
+          replyTo: msg.message_id,
+        });
         return true;
       }
       if (config.keywordPatterns.includes(pattern)) {
@@ -788,36 +1483,60 @@ async function cmdKeywords(input: CommandInput): Promise<boolean> {
       }
       const next = [...config.keywordPatterns, pattern].slice(0, 20);
       const saved = await rt.saveConfig(msg.chat.id, { keywordPatterns: next });
-      await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `已加入，现在 ${next.length} 条正则。`, { replyTo: msg.message_id });
+      await say(
+        rt,
+        msg.chat.id,
+        saved.error ? `没成功：${saved.error}` : `已加入，现在 ${next.length} 条正则。`,
+        { replyTo: msg.message_id },
+      );
       return true;
     }
     if (mode === "del" || mode === "remove") {
       const next = config.keywordPatterns.filter((item) => item !== pattern);
       await rt.saveConfig(msg.chat.id, { keywordPatterns: next });
-      await say(rt, msg.chat.id, `已删除 ${config.keywordPatterns.length - next.length} 条，剩 ${next.length} 条。`, { replyTo: msg.message_id });
+      await say(
+        rt,
+        msg.chat.id,
+        `已删除 ${config.keywordPatterns.length - next.length} 条，剩 ${next.length} 条。`,
+        { replyTo: msg.message_id },
+      );
       return true;
     }
-    await say(rt, msg.chat.id, "用法：/keywords regex add|del|list 正则", { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, "用法：/keywords regex add|del|list 正则", {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   if (action === "add") {
     const merged = parseKeywords([...config.keywords, ...parseKeywords(rest.join(" "))]);
     const saved = await rt.saveConfig(msg.chat.id, { keywords: merged });
-    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `已加入，现在共 ${merged.length} 个关键词。`, {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      saved.error ? `没成功：${saved.error}` : `已加入，现在共 ${merged.length} 个关键词。`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
   if (action === "del" || action === "remove") {
     const words = parseKeywords(rest.join(" ")).map((word) => word.toLowerCase());
     const kept = config.keywords.filter((word) => !words.includes(word.toLowerCase()));
     await rt.saveConfig(msg.chat.id, { keywords: kept });
-    await say(rt, msg.chat.id, `已删除 ${config.keywords.length - kept.length} 个，剩 ${kept.length} 个。`, {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      `已删除 ${config.keywords.length - kept.length} 个，剩 ${kept.length} 个。`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
-  await say(rt, msg.chat.id, "用法：/keywords add 词1,词2 / del 词 / list", { replyTo: msg.message_id });
+  await say(rt, msg.chat.id, "用法：/keywords add 词1,词2 / del 词 / list", {
+    replyTo: msg.message_id,
+  });
   return true;
 }
 
@@ -836,23 +1555,41 @@ async function cmdAi(input: CommandInput): Promise<boolean> {
 
   if (action === "status") {
     const day = dayKey(rt.now(), rt.tzOffset);
-    const row = await aiUsageGet(rt.db, msg.chat.id, day).catch(() => ({ calls: 0, hits: 0, failures: 0, ms: 0 }));
+    const row = await aiUsageGet(rt.db, msg.chat.id, day).catch(() => ({
+      calls: 0,
+      hits: 0,
+      failures: 0,
+      ms: 0,
+    }));
     const lines = [
       `图片审核：${config.ai ? "开" : "关"}（${config.aiProvider}，阈值 ${config.aiMinScore}，预算 ${config.aiDailyBudget}/天）`,
       `今天：调用 ${row.calls}，命中 ${row.hits}，失败 ${row.failures}`,
-      config.aiCategories.length ? `类别：${config.aiCategories.join(" / ")}` : "类别：未选，等于不审",
+      config.aiCategories.length
+        ? `类别：${config.aiCategories.join(" / ")}`
+        : "类别：未选，等于不审",
     ];
-    if (!rt.vision.configured(config.aiProvider)) lines.push("部署没有配置 VISION_KEY，打开也不会真的调用。");
+    if (!rt.vision.configured(config.aiProvider))
+      lines.push("部署没有配置 VISION_KEY，打开也不会真的调用。");
     await say(rt, msg.chat.id, lines.join("\n"), { replyTo: msg.message_id });
     return true;
   }
 
   if (action === "on" || action === "off") {
     const saved = await rt.saveConfig(msg.chat.id, { ai: action === "on" });
-    const hint = action === "on" && !rt.vision.configured(config.aiProvider) ? "（注意：部署未配置视觉服务）" : "";
-    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `图片审核已${action === "on" ? "开启" : "关闭"}${hint}。`, {
-      replyTo: msg.message_id,
-    });
+    const hint =
+      action === "on" && !rt.vision.configured(config.aiProvider)
+        ? "（注意：部署未配置视觉服务）"
+        : "";
+    await say(
+      rt,
+      msg.chat.id,
+      saved.error
+        ? `没成功：${saved.error}`
+        : `图片审核已${action === "on" ? "开启" : "关闭"}${hint}。`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
 
@@ -863,7 +1600,9 @@ async function cmdAi(input: CommandInput): Promise<boolean> {
       return true;
     }
     const saved = await rt.saveConfig(msg.chat.id, { aiProvider: value });
-    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `视觉通道：${value}`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `视觉通道：${value}`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
 
@@ -874,7 +1613,12 @@ async function cmdAi(input: CommandInput): Promise<boolean> {
       return true;
     }
     const saved = await rt.saveConfig(msg.chat.id, { aiMinScore: value });
-    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `阈值已设为 ${value}（越高越保守）。`, { replyTo: msg.message_id });
+    await say(
+      rt,
+      msg.chat.id,
+      saved.error ? `没成功：${saved.error}` : `阈值已设为 ${value}（越高越保守）。`,
+      { replyTo: msg.message_id },
+    );
     return true;
   }
 
@@ -885,7 +1629,12 @@ async function cmdAi(input: CommandInput): Promise<boolean> {
       return true;
     }
     const saved = await rt.saveConfig(msg.chat.id, { aiDailyBudget: value });
-    await say(rt, msg.chat.id, saved.error ? `没成功：${saved.error}` : `每日预算：${value} 次，超了会告警一次并停到明天。`, { replyTo: msg.message_id });
+    await say(
+      rt,
+      msg.chat.id,
+      saved.error ? `没成功：${saved.error}` : `每日预算：${value} 次，超了会告警一次并停到明天。`,
+      { replyTo: msg.message_id },
+    );
     return true;
   }
 
@@ -908,13 +1657,20 @@ async function cmdAllow(input: CommandInput, adding: boolean): Promise<boolean> 
   const typed = /^\d{4,}$/.test(input.args.trim()) ? Number(input.args.trim()) : 0;
   const target = { id: replied?.id ?? typed };
   if (!target.id) {
-    await say(rt, msg.chat.id, `用法：回复对方发 /${adding ? "allow" : "unallow"}，或 /${adding ? "allow" : "unallow"} 用户ID。白名单里的人关键词命中只记录。`, {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      `用法：回复对方发 /${adding ? "allow" : "unallow"}，或 /${adding ? "allow" : "unallow"} 用户ID。白名单里的人关键词命中只记录。`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
   const current = config.adWhitelist ?? [];
-  const next = adding ? [...new Set([...current, target.id])] : current.filter((id) => id !== target.id);
+  const next = adding
+    ? [...new Set([...current, target.id])]
+    : current.filter((id) => id !== target.id);
   if (adding && next.length > 200) {
     await say(rt, msg.chat.id, "白名单最多 200 人。", { replyTo: msg.message_id });
     return true;
@@ -925,10 +1681,17 @@ async function cmdAllow(input: CommandInput, adding: boolean): Promise<boolean> 
     return true;
   }
   if (adding) {
-    await say(rt, msg.chat.id, `已加入广告白名单（${next.length} 人）：此人的关键词命中只记录、不删除。`, { replyTo: msg.message_id });
+    await say(
+      rt,
+      msg.chat.id,
+      `已加入广告白名单（${next.length} 人）：此人的关键词命中只记录、不删除。`,
+      { replyTo: msg.message_id },
+    );
   } else {
     const removed = current.includes(target.id);
-    await say(rt, msg.chat.id, removed ? "已移出广告白名单。" : "这个人不在白名单里。", { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, removed ? "已移出广告白名单。" : "这个人不在白名单里。", {
+      replyTo: msg.message_id,
+    });
   }
   return true;
 }
@@ -949,7 +1712,9 @@ async function cmdWords(input: CommandInput): Promise<boolean> {
     lines.push("今天还没有足够的热词（同一个词至少出现在 2 条消息里才算）。");
   }
   if (days > 1 && totals.length) {
-    lines.push(`近 ${days} 天：${totals.map((row) => `${row.day.slice(5)} ${row.words} 词`).join("｜")}`);
+    lines.push(
+      `近 ${days} 天：${totals.map((row) => `${row.day.slice(5)} ${row.words} 词`).join("｜")}`,
+    );
   }
   await say(rt, msg.chat.id, lines.join("\n"), { replyTo: msg.message_id });
   return true;
@@ -970,10 +1735,12 @@ async function cmdParse(input: CommandInput): Promise<boolean> {
   const argument = input.args.trim();
   const fromArgs = argument ? extractUrls(argument) : [];
   const replied = msg.reply_to_message;
-  const candidates = fromArgs.length ? fromArgs : extractUrls(replied?.text ?? replied?.caption ?? "", [
-    ...(replied?.entities ?? []),
-    ...(replied?.caption_entities ?? []),
-  ]);
+  const candidates = fromArgs.length
+    ? fromArgs
+    : extractUrls(replied?.text ?? replied?.caption ?? "", [
+        ...(replied?.entities ?? []),
+        ...(replied?.caption_entities ?? []),
+      ]);
 
   if (!candidates.length) {
     await say(rt, msg.chat.id, usage, { replyTo: msg.message_id });
@@ -983,10 +1750,18 @@ async function cmdParse(input: CommandInput): Promise<boolean> {
   const url = candidates[0];
   const site = detectSite(url);
   if (!site) {
-    const hosts = candidates.map((item) => parseUrl(item)?.hostname).filter(Boolean).join("、");
-    await say(rt, msg.chat.id, `不支持这个站点${hosts ? `（${hosts}）` : ""}。只认抖音 / 小红书 / X / B 站。`, {
-      replyTo: msg.message_id,
-    });
+    const hosts = candidates
+      .map((item) => parseUrl(item)?.hostname)
+      .filter(Boolean)
+      .join("、");
+    await say(
+      rt,
+      msg.chat.id,
+      `不支持这个站点${hosts ? `（${hosts}）` : ""}。只认抖音 / 小红书 / X / B 站。`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
 
@@ -998,12 +1773,19 @@ async function cmdParse(input: CommandInput): Promise<boolean> {
   const host = parseHostOf(url);
   const wait = host ? parseBreakerFor(rt).retryAfterMs(host) : 0;
   if (wait > 0) {
-    await say(rt, msg.chat.id, `${parseBlockedNotice(host, wait)}\n原消息保留。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `${parseBlockedNotice(host, wait)}\n原消息保留。`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
 
   if (!allowParse(rt, msg.chat.id, config.parsePerHour)) {
-    await say(rt, msg.chat.id, `本小时解析次数已用完（上限 ${config.parsePerHour} 次），稍后再试。`, { replyTo: msg.message_id });
+    await say(
+      rt,
+      msg.chat.id,
+      `本小时解析次数已用完（上限 ${config.parsePerHour} 次），稍后再试。`,
+      { replyTo: msg.message_id },
+    );
     return true;
   }
 
@@ -1014,10 +1796,18 @@ async function cmdParse(input: CommandInput): Promise<boolean> {
     url,
     site,
   });
-  const outcome = await runParseJob(rt, { id: jobId, chatId: msg.chat.id, messageId: msg.message_id, url, site });
+  const outcome = await runParseJob(rt, {
+    id: jobId,
+    chatId: msg.chat.id,
+    messageId: msg.message_id,
+    url,
+    site,
+  });
   if (!outcome.ok) {
     const how = outcome.mode === "full" ? "解析失败" : "只拿到预览，且失败了";
-    await say(rt, msg.chat.id, `${how}：${outcome.error || "未知原因"}。原消息保留。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `${how}：${outcome.error || "未知原因"}。原消息保留。`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   // Preview mode says what it is inside the card instead of firing a second
@@ -1029,12 +1819,16 @@ async function cmdLogs(input: CommandInput): Promise<boolean> {
   const { rt, msg, config } = input;
   const value = input.args.trim();
   if (!value) {
-    await say(rt, msg.chat.id, `记录目标：${config.logChatId || rt.env.LOG_CHAT_ID || "未设置"}`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `记录目标：${config.logChatId || rt.env.LOG_CHAT_ID || "未设置"}`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   if (value.toLowerCase() === "off") {
     await rt.saveConfig(msg.chat.id, { logChatId: "" });
-    await say(rt, msg.chat.id, "已关闭记录（若部署里配了 LOG_CHAT_ID，会继续发到那里）。", { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, "已关闭记录（若部署里配了 LOG_CHAT_ID，会继续发到那里）。", {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   if (!/^-?\d+$/.test(value)) {
@@ -1042,7 +1836,9 @@ async function cmdLogs(input: CommandInput): Promise<boolean> {
     return true;
   }
   await rt.saveConfig(msg.chat.id, { logChatId: value });
-  await say(rt, msg.chat.id, `记录会发到 ${value}（记得把我加进去并给发消息权限）。`, { replyTo: msg.message_id });
+  await say(rt, msg.chat.id, `记录会发到 ${value}（记得把我加进去并给发消息权限）。`, {
+    replyTo: msg.message_id,
+  });
   return true;
 }
 
@@ -1051,21 +1847,31 @@ async function cmdNight(input: CommandInput): Promise<boolean> {
   const parts = input.args.trim().split(/\s+/).filter(Boolean);
   if (!parts.length) {
     const state = config.nightMode ? `${config.nightStart}–${config.nightEnd}` : "关";
-    const nowIn = config.nightMode && inNightWindow(rt.now(), config.nightStart, config.nightEnd, rt.tzOffset);
-    await say(rt, msg.chat.id, `夜间模式：${state}${config.nightMode ? `（当前${nowIn ? "在" : "不在"}夜间）` : ""}`, {
-      replyTo: msg.message_id,
-    });
+    const nowIn =
+      config.nightMode && inNightWindow(rt.now(), config.nightStart, config.nightEnd, rt.tzOffset);
+    await say(
+      rt,
+      msg.chat.id,
+      `夜间模式：${state}${config.nightMode ? `（当前${nowIn ? "在" : "不在"}夜间）` : ""}`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
   const head = parts[0].toLowerCase();
   if (["on", "off"].includes(head)) {
     await rt.saveConfig(msg.chat.id, { nightMode: head === "on" });
-    await say(rt, msg.chat.id, `夜间模式已${head === "on" ? "打开" : "关闭"}。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `夜间模式已${head === "on" ? "打开" : "关闭"}。`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   const range = parts[0].match(/^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$/);
   if (!range) {
-    await say(rt, msg.chat.id, "用法：/nightmode on|off，或 /nightmode 23:00-07:00", { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, "用法：/nightmode on|off，或 /nightmode 23:00-07:00", {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   await rt.saveConfig(msg.chat.id, {
@@ -1073,9 +1879,14 @@ async function cmdNight(input: CommandInput): Promise<boolean> {
     nightStart: `${range[1]}:${range[2]}`,
     nightEnd: `${range[3]}:${range[4]}`,
   });
-  await say(rt, msg.chat.id, `夜间模式：${range[1]}:${range[2]}–${range[3]}:${range[4]}，期间只有管理员能发言。`, {
-    replyTo: msg.message_id,
-  });
+  await say(
+    rt,
+    msg.chat.id,
+    `夜间模式：${range[1]}:${range[2]}–${range[3]}:${range[4]}，期间只有管理员能发言。`,
+    {
+      replyTo: msg.message_id,
+    },
+  );
   return true;
 }
 
@@ -1088,7 +1899,13 @@ async function cmdTrust(input: CommandInput): Promise<boolean> {
   }
   await unmute(rt, msg.chat.id, target.id);
   await trustAdd(rt.db, msg.chat.id, target.id, rt.now()).catch(() => undefined);
-  await record(rt, { chatId: msg.chat.id, userId: target.id, kind: "trust", reason: "管理员信任", byId: msg.from?.id });
+  await record(rt, {
+    chatId: msg.chat.id,
+    userId: target.id,
+    kind: "trust",
+    reason: "管理员信任",
+    byId: msg.from?.id,
+  });
   await say(rt, msg.chat.id, "已信任：不再走新人限制。", { replyTo: msg.message_id });
   return true;
 }
@@ -1108,11 +1925,18 @@ async function cmdSchedule(input: CommandInput): Promise<boolean> {
       await reply(input, "还没有定时消息。用法：/schedule 3600 文本（间隔秒，0=只发一次）");
       return true;
     }
-    const lines = rows.map((row: { id: number; every: number; nextAt: number; enabled: number; text: string }) => {
-      const when = new Date(row.nextAt + rt.tzOffset * 60_000).toISOString().slice(0, 16).replace("T", " ");
-      return `#${row.id} ${row.every > 0 ? `每 ${row.every}s` : "一次"} · ${row.enabled ? `下次 ${when}` : "已停用"} · ${row.text.slice(0, 30)}`;
+    const lines = rows.map(
+      (row: { id: number; every: number; nextAt: number; enabled: number; text: string }) => {
+        const when = new Date(row.nextAt + rt.tzOffset * 60_000)
+          .toISOString()
+          .slice(0, 16)
+          .replace("T", " ");
+        return `#${row.id} ${row.every > 0 ? `每 ${row.every}s` : "一次"} · ${row.enabled ? `下次 ${when}` : "已停用"} · ${row.text.slice(0, 30)}`;
+      },
+    );
+    await say(rt, msg.chat.id, ["定时消息：", ...lines, "", "删除：/schedule del ID"].join("\n"), {
+      replyTo: msg.message_id,
     });
-    await say(rt, msg.chat.id, ["定时消息：", ...lines, "", "删除：/schedule del ID"].join("\n"), { replyTo: msg.message_id });
     return true;
   }
 
@@ -1138,7 +1962,13 @@ async function cmdSchedule(input: CommandInput): Promise<boolean> {
     await reply(input, "内容不能为空。");
     return true;
   }
-  await scheduleAdd(rt.db, { chatId: msg.chat.id, text, every, nextAt: rt.now() + 60_000, createdBy: msg.from?.id ?? 0 });
+  await scheduleAdd(rt.db, {
+    chatId: msg.chat.id,
+    text,
+    every,
+    nextAt: rt.now() + 60_000,
+    createdBy: msg.from?.id ?? 0,
+  });
   await reply(input, `已排期：${every > 0 ? `每 ${every} 秒` : "只发一次"}，1 分钟后开始。`);
   return true;
 }
@@ -1151,9 +1981,16 @@ async function handleNoteRead(input: CommandInput, name: string): Promise<boolea
   const { rt, msg } = input;
   if (name === "notes") {
     const list = await noteList(rt.db, msg.chat.id);
-    await say(rt, msg.chat.id, list.length ? `本群有 ${list.length} 条：${list.map((n) => n.name).join("、")}` : "本群还没有保存的说明。", {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      list.length
+        ? `本群有 ${list.length} 条：${list.map((n) => n.name).join("、")}`
+        : "本群还没有保存的说明。",
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
   const key = input.args.trim().split(/\s+/)[0];
@@ -1162,7 +1999,9 @@ async function handleNoteRead(input: CommandInput, name: string): Promise<boolea
     return true;
   }
   const note = await noteGet(rt.db, msg.chat.id, key.toLowerCase());
-  await say(rt, msg.chat.id, note ? note.content : `没有叫「${key}」的说明。`, { replyTo: msg.message_id });
+  await say(rt, msg.chat.id, note ? note.content : `没有叫「${key}」的说明。`, {
+    replyTo: msg.message_id,
+  });
   return true;
 }
 
@@ -1196,7 +2035,9 @@ async function handleNoteWrite(input: CommandInput, name: string): Promise<boole
     createdBy: msg.from?.id ?? 0,
     at: rt.now(),
   });
-  await say(rt, msg.chat.id, `已保存「${key}」。任何人都可以用 /get ${key} 看。`, { replyTo: msg.message_id });
+  await say(rt, msg.chat.id, `已保存「${key}」。任何人都可以用 /get ${key} 看。`, {
+    replyTo: msg.message_id,
+  });
   return true;
 }
 
@@ -1208,9 +2049,14 @@ async function handleFilters(input: CommandInput, name: string): Promise<boolean
       await reply(input, "还没有自动回复。用法：/filter add exact 你好 => 你也好");
       return true;
     }
-    await say(rt, msg.chat.id, list.map((f) => `#${f.id} [${f.match}] ${f.trigger} → ${f.response.slice(0, 40)}`).join("\n"), {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      list.map((f) => `#${f.id} [${f.match}] ${f.trigger} → ${f.response.slice(0, 40)}`).join("\n"),
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
   if (name === "delfilter") {
@@ -1379,7 +2225,9 @@ async function cmdOcr(input: CommandInput): Promise<boolean> {
   if (!text) return reply(input, "这张图上没有能认出来的文字。");
 
   if (run.screen.hit) {
-    const errors = run.screen.errors.length ? `（部分操作没成功：${run.screen.errors.join("；")}）` : "";
+    const errors = run.screen.errors.length
+      ? `（部分操作没成功：${run.screen.errors.join("；")}）`
+      : "";
     return reply(input, `${run.screen.reason}，已按群规处置${errors}`);
   }
 
@@ -1401,9 +2249,7 @@ async function cmdOcr(input: CommandInput): Promise<boolean> {
  * as-is when it is an image — that is how screenshots get sent "without
  * compression", and it is the case where OCR quality matters most.
  */
-function ocrSubject(
-  msg: TgMessage,
-): { fileId: string; mime: string } | null {
+function ocrSubject(msg: TgMessage): { fileId: string; mime: string } | null {
   const doc = msg.document;
   if (doc && typeof doc.mime_type === "string" && doc.mime_type.startsWith("image/")) {
     return { fileId: doc.file_id, mime: doc.mime_type };
@@ -1460,7 +2306,12 @@ async function cmdExport(input: CommandInput): Promise<boolean> {
   const notes = await noteList(rt.db, msg.chat.id);
   const filters = await filterList(rt.db, msg.chat.id);
   const payload = JSON.stringify(
-    { v: 1, config, notes: notes.map((n) => ({ name: n.name, content: n.content })), filters: filters.map((f) => ({ trigger: f.trigger, match: f.match, response: f.response })) },
+    {
+      v: 1,
+      config,
+      notes: notes.map((n) => ({ name: n.name, content: n.content })),
+      filters: filters.map((f) => ({ trigger: f.trigger, match: f.match, response: f.response })),
+    },
     null,
     0,
   );
@@ -1469,7 +2320,8 @@ async function cmdExport(input: CommandInput): Promise<boolean> {
   const chunks: string[] = [];
   for (let i = 0; i < payload.length; i += 3500) chunks.push(payload.slice(i, i + 3500));
   for (const chunk of chunks.slice(0, 4)) await say(rt, msg.chat.id, chunk);
-  if (chunks.length > 4) await say(rt, msg.chat.id, "规则太大，导出被截断，请先删掉一些说明或自动回复。");
+  if (chunks.length > 4)
+    await say(rt, msg.chat.id, "规则太大，导出被截断，请先删掉一些说明或自动回复。");
   return true;
 }
 
@@ -1487,7 +2339,11 @@ async function cmdImport(input: CommandInput): Promise<boolean> {
     await reply(input, "不是合法 JSON。");
     return true;
   }
-  const data = parsed as { config?: Record<string, unknown>; notes?: { name?: string; content?: string }[]; filters?: { trigger?: string; match?: string; response?: string }[] };
+  const data = parsed as {
+    config?: Record<string, unknown>;
+    notes?: { name?: string; content?: string }[];
+    filters?: { trigger?: string; match?: string; response?: string }[];
+  };
   let applied = 0;
   if (data.config && typeof data.config === "object") {
     const safe = { ...data.config };
@@ -1500,12 +2356,23 @@ async function cmdImport(input: CommandInput): Promise<boolean> {
     }
     applied += 1;
   }
-  const noteRows = (Array.isArray(data.notes) ? data.notes : []) as { name?: string; content?: string }[];
+  const noteRows = (Array.isArray(data.notes) ? data.notes : []) as {
+    name?: string;
+    content?: string;
+  }[];
   for (const row of noteRows) {
-    const name = String(row?.name ?? "").toLowerCase().slice(0, 40);
+    const name = String(row?.name ?? "")
+      .toLowerCase()
+      .slice(0, 40);
     const content = String(row?.content ?? "").slice(0, 3500);
     if (!name || !content) continue;
-    await noteSave(rt.db, { chatId: msg.chat.id, name, content, createdBy: msg.from?.id ?? 0, at: rt.now() });
+    await noteSave(rt.db, {
+      chatId: msg.chat.id,
+      name,
+      content,
+      createdBy: msg.from?.id ?? 0,
+      at: rt.now(),
+    });
     applied += 1;
   }
 
@@ -1520,7 +2387,14 @@ async function cmdImport(input: CommandInput): Promise<boolean> {
     if (!trigger || !response) continue;
     const mode = String(row?.match ?? "exact") as FilterMatchMode;
     if (!MATCH_MODES.includes(mode)) continue;
-    await filterAdd(rt.db, { chatId: msg.chat.id, trigger, match: mode, response, createdBy: msg.from?.id ?? 0, at: rt.now() });
+    await filterAdd(rt.db, {
+      chatId: msg.chat.id,
+      trigger,
+      match: mode,
+      response,
+      createdBy: msg.from?.id ?? 0,
+      at: rt.now(),
+    });
     applied += 1;
   }
 
@@ -1536,7 +2410,9 @@ async function reply(input: CommandInput, text: string): Promise<boolean> {
 }
 
 async function report(input: CommandInput, ok: boolean, text: string): Promise<void> {
-  await say(input.rt, input.msg.chat.id, ok ? text : `没成功：${text}`, { replyTo: input.msg.message_id });
+  await say(input.rt, input.msg.chat.id, ok ? text : `没成功：${text}`, {
+    replyTo: input.msg.message_id,
+  });
 }
 
 export { guardTarget, unmute };
@@ -1549,9 +2425,14 @@ async function cmdBlock(input: CommandInput, blocking: boolean): Promise<boolean
   const { rt, msg } = input;
   const target = parseTarget(msg, input.args);
   if (!target.id) {
-    await say(rt, msg.chat.id, `用法：回复一条消息发 /${blocking ? "block" : "unblock"}，或 /${blocking ? "block" : "unblock"} 用户ID`, {
-      replyTo: msg.message_id,
-    });
+    await say(
+      rt,
+      msg.chat.id,
+      `用法：回复一条消息发 /${blocking ? "block" : "unblock"}，或 /${blocking ? "block" : "unblock"} 用户ID`,
+      {
+        replyTo: msg.message_id,
+      },
+    );
     return true;
   }
   if (blocking && !(await guardTarget(rt, msg, target.id))) return true;
@@ -1559,17 +2440,37 @@ async function cmdBlock(input: CommandInput, blocking: boolean): Promise<boolean
   if (blocking) {
     const reason = input.args.replace(String(target.id), "").trim().slice(0, 200) || "管理员屏蔽";
     await block(rt, msg.chat.id, target.id, reason, msg.from?.id ?? 0);
-    await record(rt, { chatId: msg.chat.id, userId: target.id, kind: "block", reason, byId: msg.from?.id });
-    await say(rt, msg.chat.id, `已屏蔽 <code>${target.id}</code>：之后它的消息会被静默删除，不会收到任何提示。`, {
-      replyTo: msg.message_id,
-      html: true,
+    await record(rt, {
+      chatId: msg.chat.id,
+      userId: target.id,
+      kind: "block",
+      reason,
+      byId: msg.from?.id,
     });
+    await say(
+      rt,
+      msg.chat.id,
+      `已屏蔽 <code>${target.id}</code>：之后它的消息会被静默删除，不会收到任何提示。`,
+      {
+        replyTo: msg.message_id,
+        html: true,
+      },
+    );
     return true;
   }
 
   await unblock(rt, msg.chat.id, target.id);
-  await record(rt, { chatId: msg.chat.id, userId: target.id, kind: "trust", reason: "解除屏蔽", byId: msg.from?.id });
-  await say(rt, msg.chat.id, `已解除屏蔽 <code>${target.id}</code>。`, { replyTo: msg.message_id, html: true });
+  await record(rt, {
+    chatId: msg.chat.id,
+    userId: target.id,
+    kind: "trust",
+    reason: "解除屏蔽",
+    byId: msg.from?.id,
+  });
+  await say(rt, msg.chat.id, `已解除屏蔽 <code>${target.id}</code>。`, {
+    replyTo: msg.message_id,
+    html: true,
+  });
   return true;
 }
 
@@ -1577,12 +2478,17 @@ async function cmdBlocks(input: CommandInput): Promise<boolean> {
   const { rt, msg } = input;
   const rows = await listBlocked(rt, msg.chat.id);
   if (!rows.length) {
-    await say(rt, msg.chat.id, "本群没有屏蔽成员。用法：回复消息发 /block", { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, "本群没有屏蔽成员。用法：回复消息发 /block", {
+      replyTo: msg.message_id,
+    });
     return true;
   }
   const lines = [`本群屏蔽 ${rows.length} 人：`];
   for (const row of rows.slice(0, 30)) {
-    const when = new Date(row.at + rt.tzOffset * 60_000).toISOString().slice(0, 16).replace("T", " ");
+    const when = new Date(row.at + rt.tzOffset * 60_000)
+      .toISOString()
+      .slice(0, 16)
+      .replace("T", " ");
     lines.push(`· <code>${row.userId}</code> ${when} ${row.reason || ""}`.trim());
   }
   if (rows.length > 30) lines.push(`…还有 ${rows.length - 30} 人，见后台`);
@@ -1596,7 +2502,9 @@ async function cmdBlocks(input: CommandInput): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 export function parseSyncInterval(raw: string | undefined): number | null {
-  const value = String(raw ?? "").trim().toLowerCase();
+  const value = String(raw ?? "")
+    .trim()
+    .toLowerCase();
   if (!value || value === "instant" || value === "即时") return 0;
   const seconds = Number(value);
   if (!Number.isFinite(seconds)) return null;
@@ -1611,9 +2519,17 @@ async function cmdSync(input: CommandInput): Promise<boolean> {
   if (action === "list" || !sub) {
     const rows = await syncList(rt.db, msg.chat.id);
     if (!rows.length) {
-      return say(rt, msg.chat.id, "还没有同步。用法：/sync add @频道 300（秒），或 /sync add @频道 instant", {
-        replyTo: msg.message_id,
-      }), true;
+      return (
+        say(
+          rt,
+          msg.chat.id,
+          "还没有同步。用法：/sync add @频道 300（秒），或 /sync add @频道 instant",
+          {
+            replyTo: msg.message_id,
+          },
+        ),
+        true
+      );
     }
     const lines = ["本群同步任务："];
     for (const row of rows) lines.push(`· @${row.source} — ${describeSync(row)}`);
@@ -1634,20 +2550,30 @@ async function cmdSync(input: CommandInput): Promise<boolean> {
     const source = normalizeChannel(rest[0] ?? "");
     if (!source) return reply(input, `给一个频道用户名，例如 /sync ${action} @my_channel`);
     await syncEnable(rt.db, msg.chat.id, source, action === "on");
-    await say(rt, msg.chat.id, `@${source} 的同步已${action === "on" ? "启用" : "停用"}。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `@${source} 的同步已${action === "on" ? "启用" : "停用"}。`, {
+      replyTo: msg.message_id,
+    });
     return true;
   }
 
-  if (action !== "add") return reply(input, "用法：/sync add @频道 [间隔秒|instant]｜/sync list｜/sync on|off @频道｜/sync del @频道");
+  if (action !== "add")
+    return reply(
+      input,
+      "用法：/sync add @频道 [间隔秒|instant]｜/sync list｜/sync on|off @频道｜/sync del @频道",
+    );
 
   const source = normalizeChannel(rest[0] ?? "");
-  if (!source) return reply(input, "频道用户名不合法。给 @name 或 https://t.me/name（私有邀请链接不行）。");
+  if (!source)
+    return reply(input, "频道用户名不合法。给 @name 或 https://t.me/name（私有邀请链接不行）。");
   const interval = parseSyncInterval(rest[1]);
   if (interval === null) return reply(input, "间隔要写秒数（≥60）或 instant。");
 
-  const chat = await rt.api.call<{ type: string; title?: string }>("getChat", { chat_id: `@${source}` });
+  const chat = await rt.api.call<{ type: string; title?: string }>("getChat", {
+    chat_id: `@${source}`,
+  });
   if (!chat.ok) return reply(input, `读不到 @${source}：${chat.error}`);
-  if (chat.result.type !== "channel") return reply(input, `@${source} 不是频道（类型 ${chat.result.type}）。`);
+  if (chat.result.type !== "channel")
+    return reply(input, `@${source} 不是频道（类型 ${chat.result.type}）。`);
 
   if (interval === 0) {
     const me = await rt.api.call<{ status: string }>("getChatMember", {
@@ -1655,15 +2581,23 @@ async function cmdSync(input: CommandInput): Promise<boolean> {
       user_id: Number(rt.api.botId),
     });
     if (!me.ok || me.result.status !== "administrator") {
-      return reply(input, `即时同步要求机器人是 @${source} 的管理员（当前：${me.ok ? me.result.status : "读不到"}）。`);
+      return reply(
+        input,
+        `即时同步要求机器人是 @${source} 的管理员（当前：${me.ok ? me.result.status : "读不到"}）。`,
+      );
     }
   }
 
   await syncUpsert(rt.db, { chatId: msg.chat.id, source, intervalSeconds: interval, at: rt.now() });
   const cadence = interval === 0 ? "即时（频道有新帖就转）" : `每 ${interval} 秒检查一次`;
-  await say(rt, msg.chat.id, `已添加 @${source} → 本群，${cadence}。\n注意：机器人必须能读到该频道；私有频道要先把机器人加进去。`, {
-    replyTo: msg.message_id,
-  });
+  await say(
+    rt,
+    msg.chat.id,
+    `已添加 @${source} → 本群，${cadence}。\n注意：机器人必须能读到该频道；私有频道要先把机器人加进去。`,
+    {
+      replyTo: msg.message_id,
+    },
+  );
   return true;
 }
 
@@ -1697,10 +2631,16 @@ async function cmdTimestamp(input: CommandInput): Promise<boolean> {
   if (!raw) return reply(input, "用法：/ts 1700000000 或 /ts 2026-10-28 18:00");
   if (!allowTool(rt, msg.from?.id ?? 0, 8)) return reply(input, "太频繁了，等一分钟再试。");
   const view = convertTimestamp(raw, rt.tzOffset);
-  if (!view) return reply(input, "认不出这个时间。支持 10 位秒、13 位毫秒、ISO，或 2026-10-28 18:00。");
-  await say(rt, msg.chat.id, `Unix：${view.unix}\n毫秒：${view.ms}\nUTC：${view.iso}\n本地：${view.local}`, {
-    replyTo: msg.message_id,
-  });
+  if (!view)
+    return reply(input, "认不出这个时间。支持 10 位秒、13 位毫秒、ISO，或 2026-10-28 18:00。");
+  await say(
+    rt,
+    msg.chat.id,
+    `Unix：${view.unix}\n毫秒：${view.ms}\nUTC：${view.iso}\n本地：${view.local}`,
+    {
+      replyTo: msg.message_id,
+    },
+  );
   return true;
 }
 
@@ -1752,17 +2692,26 @@ async function cmdSplitPdf(input: CommandInput): Promise<boolean> {
   const total = pages[0]?.total ?? 0;
   if (total <= 1) return reply(input, "这个 PDF 只有一页，不用拆。");
   if (total > pages.length) {
-    await say(rt, msg.chat.id, `共 ${total} 页，一次只发前 ${pages.length} 页。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `共 ${total} 页，一次只发前 ${pages.length} 页。`, {
+      replyTo: msg.message_id,
+    });
   }
 
   let sent = 0;
   for (const page of pages) {
-    const res = await rt.api.sendDocument(msg.chat.id, page.data, `page-${page.page}-of-${total}.pdf`, {
-      replyTo: msg.message_id,
-      caption: `第 ${page.page}/${total} 页`,
-    });
+    const res = await rt.api.sendDocument(
+      msg.chat.id,
+      page.data,
+      `page-${page.page}-of-${total}.pdf`,
+      {
+        replyTo: msg.message_id,
+        caption: `第 ${page.page}/${total} 页`,
+      },
+    );
     if (!res.ok) {
-      await say(rt, msg.chat.id, `第 ${page.page} 页没发出去：${res.error}`, { replyTo: msg.message_id });
+      await say(rt, msg.chat.id, `第 ${page.page} 页没发出去：${res.error}`, {
+        replyTo: msg.message_id,
+      });
       break;
     }
     sent += 1;
@@ -1774,9 +2723,13 @@ async function cmdSplitPdf(input: CommandInput): Promise<boolean> {
 async function cmdSlice(input: CommandInput): Promise<boolean> {
   const { rt, msg } = input;
   if (!rt.sliceImage) {
-    return reply(input, "长图切分需要自托管版（Worker 里没有图像处理原生库）。本机跑 npm run dev 时可用。");
+    return reply(
+      input,
+      "长图切分需要自托管版（Worker 里没有图像处理原生库）。本机跑 npm run dev 时可用。",
+    );
   }
-  const photo = msg.reply_to_message?.photo?.at(-1) as { file_id: string; file_size?: number } | undefined;
+  const photo = msg.reply_to_message?.photo?.at(-1) as
+    { file_id: string; file_size?: number } | undefined;
   const doc = msg.reply_to_message?.document;
   const fileId = photo?.file_id ?? doc?.file_id;
   const looksImage = photo || /^image\//i.test(doc?.mime_type ?? "");
@@ -1800,7 +2753,9 @@ async function cmdSlice(input: CommandInput): Promise<boolean> {
   const slices = result.slices;
   if (result.truncated) {
     // Never drop the bottom of somebody's screenshot without saying so.
-    await say(rt, msg.chat.id, `这张图有 ${result.total} 段，一次只发前 ${slices.length} 段。`, { replyTo: msg.message_id });
+    await say(rt, msg.chat.id, `这张图有 ${result.total} 段，一次只发前 ${slices.length} 段。`, {
+      replyTo: msg.message_id,
+    });
   }
 
   let sent = 0;
@@ -1816,9 +2771,24 @@ async function cmdSlice(input: CommandInput): Promise<boolean> {
   return true;
 }
 
-async function toolStatsLog(rt: Runtime, msg: TgMessage, tool: string, ok: boolean, count = 0): Promise<void> {
+async function toolStatsLog(
+  rt: Runtime,
+  msg: TgMessage,
+  tool: string,
+  ok: boolean,
+  count = 0,
+): Promise<void> {
   await import("../db/repo.ts")
-    .then((repo) => repo.toolLog(rt.db, { chatId: msg.chat.id, userId: msg.from?.id, tool, ok, bytes: count, at: rt.now() }))
+    .then((repo) =>
+      repo.toolLog(rt.db, {
+        chatId: msg.chat.id,
+        userId: msg.from?.id,
+        tool,
+        ok,
+        bytes: count,
+        at: rt.now(),
+      }),
+    )
     .catch(() => undefined);
 }
 

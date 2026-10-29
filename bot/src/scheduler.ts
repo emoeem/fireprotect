@@ -10,7 +10,14 @@
  */
 import type { Runtime } from "./context.ts";
 import { cachesFor } from "./caches.ts";
-import { aiUsagePrune, eventsPrune, parseJobsPrune, toolUsagePrune, wordStatsPrune, memberStatsPrune } from "./db/repo.ts";
+import {
+  aiUsagePrune,
+  eventsPrune,
+  parseJobsPrune,
+  toolUsagePrune,
+  wordStatsPrune,
+  memberStatsPrune,
+} from "./db/repo.ts";
 import { scheduleDue, scheduleMarkSent } from "./db/repo.ts";
 import { leaderboard, leaderboardText } from "./members.ts";
 import { notifyOperators } from "./notify.ts";
@@ -20,9 +27,13 @@ import { escapeHtml } from "./telegram.ts";
 const RETRY_MS = 5 * 60_000;
 
 /** Errors that will never succeed on retry. */
-const PERMANENT = /chat not found|bot was kicked|not enough rights|have no rights|CHAT_WRITE_FORBIDDEN|user is deactivated/i;
+const PERMANENT =
+  /chat not found|bot was kicked|not enough rights|have no rights|CHAT_WRITE_FORBIDDEN|user is deactivated/i;
 
-export async function runScheduled(rt: Runtime, limit = 10): Promise<{ sent: number; failed: number; disabled: number }> {
+export async function runScheduled(
+  rt: Runtime,
+  limit = 10,
+): Promise<{ sent: number; failed: number; disabled: number }> {
   const due = await scheduleDue(rt.db, rt.now(), limit);
   let sent = 0;
   let failed = 0;
@@ -31,9 +42,16 @@ export async function runScheduled(rt: Runtime, limit = 10): Promise<{ sent: num
   for (const row of due) {
     // `{{top}}` in a scheduled message is a placeholder, not literal text: it
     // turns any daily slot into "post the leaderboard" without a new feature.
-    const text = row.text.includes("{{top}}")
-      ? row.text.split("{{top}}").join(leaderboardText(await leaderboard(rt, row.chatId, 10)))
-      : row.text;
+    // 消息按 HTML 发送：管理员写的正文与 {{top}} 展开的成员名都可能含 <、&，
+    // 不转义就是每 5 分钟一次的 400（bad entities），该行永远发不出去。
+    // 逐段转义字面文本，排行榜本身已是构造好的 HTML，原样插入。
+    const leaderboardHtml = row.text.includes("{{top}}")
+      ? leaderboardText(await leaderboard(rt, row.chatId, 10))
+      : "";
+    const text = row.text
+      .split("{{top}}")
+      .map((segment) => escapeHtml(segment))
+      .join(leaderboardHtml);
     const res = await say(rt, row.chatId, text, { html: true });
     if (res.ok) {
       sent += 1;
@@ -46,10 +64,19 @@ export async function runScheduled(rt: Runtime, limit = 10): Promise<{ sent: num
       disabled += 1;
       await scheduleMarkSent(rt.db, row.id, null, res.error);
     } else {
-      await scheduleMarkSent(rt.db, row.id, rt.now() + RETRY_MS, `${res.error}${row.lastError ? ` | 上次：${row.lastError}` : ""}`.slice(0, 200));
+      await scheduleMarkSent(
+        rt.db,
+        row.id,
+        rt.now() + RETRY_MS,
+        `${res.error}${row.lastError ? ` | 上次：${row.lastError}` : ""}`.slice(0, 200),
+      );
     }
     console.log(`scheduled #${row.id} failed: ${res.error}`);
-    void notifyOperators(rt, "scheduled-row-failed", `定时消息 #${row.id} 发送失败：${res.error.slice(0, 200)}`);
+    void notifyOperators(
+      rt,
+      "scheduled-row-failed",
+      `定时消息 #${row.id} 发送失败：${res.error.slice(0, 200)}`,
+    );
   }
 
   return { sent, failed, disabled };
@@ -92,8 +119,14 @@ export async function runRetention(rt: Runtime): Promise<{ pruned: boolean; fail
 }
 
 /** Human-readable summary of one row, used by /schedule and the panel. */
-export function describeSchedule(row: { every: number; enabled: number; nextAt: number; sent: number; lastError: string }, tzOffset = 480): string {
-  const when = new Date(row.nextAt + tzOffset * 60_000).toISOString().slice(0, 16).replace("T", " ");
+export function describeSchedule(
+  row: { every: number; enabled: number; nextAt: number; sent: number; lastError: string },
+  tzOffset = 480,
+): string {
+  const when = new Date(row.nextAt + tzOffset * 60_000)
+    .toISOString()
+    .slice(0, 16)
+    .replace("T", " ");
   const cadence = row.every > 0 ? `每 ${row.every} 秒` : "一次性";
   const parts = [`${cadence}`, row.enabled ? `下次 ${when}` : "已停用", `已发 ${row.sent}`];
   if (row.lastError) parts.push(`错误：${escapeHtml(row.lastError.slice(0, 60))}`);

@@ -6,6 +6,7 @@
  * secret. When no `WEBHOOK_SECRET` is configured the page still renders but the
  * POST is refused — an unauthenticated installer is worse than a manual step.
  */
+import { safeEqual } from "./telegram.ts";
 import { escape as escapeEntities } from "he";
 import type { Env } from "./types.ts";
 
@@ -72,7 +73,11 @@ export async function handleInstall(request: Request, env: Env): Promise<Install
   }
 
   if (!env.WEBHOOK_SECRET) {
-    return { status: 403, body: renderInstallPage(env, "部署没有配置 WEBHOOK_SECRET，拒绝远程安装。"), html: true };
+    return {
+      status: 403,
+      body: renderInstallPage(env, "部署没有配置 WEBHOOK_SECRET，拒绝远程安装。"),
+      html: true,
+    };
   }
 
   const contentType = request.headers.get("content-type") ?? "";
@@ -88,7 +93,7 @@ export async function handleInstall(request: Request, env: Env): Promise<Install
     target = String(form?.get("url") ?? "");
   }
 
-  if (key !== env.WEBHOOK_SECRET) {
+  if (!safeEqual(key, env.WEBHOOK_SECRET ?? "")) {
     return { status: 403, body: renderInstallPage(env, "密钥不对。"), html: true };
   }
 
@@ -116,7 +121,11 @@ export async function handleInstall(request: Request, env: Env): Promise<Install
   });
   const payload = (await res.json().catch(() => ({}))) as { ok?: boolean; description?: string };
   if (!payload.ok) {
-    return { status: 502, body: renderInstallPage(env, `Telegram 拒绝：${payload.description ?? res.status}`), html: true };
+    return {
+      status: 502,
+      body: renderInstallPage(env, `Telegram 拒绝：${payload.description ?? res.status}`),
+      html: true,
+    };
   }
   return { status: 200, body: renderInstallPage(env, `已注册：${webhookUrl}`), html: true };
 }

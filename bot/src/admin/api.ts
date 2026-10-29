@@ -71,7 +71,13 @@ import { dayKey } from "../ai/words.ts";
 import { cachesFor } from "../caches.ts";
 import { safeEqual } from "../telegram.ts";
 import { authorizeConsoleUser, verifyInitData } from "./tginit.ts";
-import { LOGIN_CODE_TTL_S, consumeLoginCode, issueLoginCode, loginCodeStatus, newLoginCode } from "./login-codes.ts";
+import {
+  LOGIN_CODE_TTL_S,
+  consumeLoginCode,
+  issueLoginCode,
+  loginCodeStatus,
+  newLoginCode,
+} from "./login-codes.ts";
 
 const COOKIE = "fw_admin";
 const SESSION_MS = 12 * 3600_000;
@@ -124,7 +130,10 @@ async function sign(env: Env, expiry: string): Promise<string> {
     ["sign"],
   );
   const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, enc.encode(expiry)));
-  return [...sig].map((byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 32);
+  return [...sig]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 32);
 }
 
 export async function mintSession(env: Env, nowMs: number, userId?: number): Promise<string> {
@@ -137,7 +146,11 @@ export async function mintSession(env: Env, nowMs: number, userId?: number): Pro
   return `${payload}.${await sign(env, payload)}`;
 }
 
-export async function validSession(env: Env, cookie: string | null | undefined, nowMs: number): Promise<{ ok: boolean; userId?: number }> {
+export async function validSession(
+  env: Env,
+  cookie: string | null | undefined,
+  nowMs: number,
+): Promise<{ ok: boolean; userId?: number }> {
   if (!sessionSecret(env)) return { ok: false };
   if (!cookie) return { ok: false };
   const parts = String(cookie).split(".");
@@ -206,7 +219,11 @@ async function chargeFailure(rt: Runtime, ip: string): Promise<void> {
   if (recentFails.size > 2_000) recentFails.clear();
   recentFails.set(ip, { n: next, at: nowMs });
   try {
-    await rt.store.put(`admin:fail:${ip}`, String(await loginFailures(rt, ip)), LOGIN_FAIL_WINDOW_S);
+    await rt.store.put(
+      `admin:fail:${ip}`,
+      String(await loginFailures(rt, ip)),
+      LOGIN_FAIL_WINDOW_S,
+    );
   } catch {
     // The memory counter already recorded it; persistence is a bonus.
   }
@@ -233,7 +250,11 @@ function readCookie(request: Request, name: string): string | null {
 function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      ...headers,
+    },
   });
 }
 
@@ -244,7 +265,12 @@ function json(body: unknown, status = 200, headers: Record<string, string> = {})
  * object that has schema defaults writes every field back, so "change one
  * number" silently resets the rest. Whitelisting keys is the cheap guard.
  */
-async function patchKeys(rt: Runtime, chatId: number, body: Record<string, unknown>, keys: string[]): Promise<Response> {
+async function patchKeys(
+  rt: Runtime,
+  chatId: number,
+  body: Record<string, unknown>,
+  keys: string[],
+): Promise<Response> {
   const patch: Record<string, unknown> = {};
   for (const key of keys) if (body[key] !== undefined) patch[key] = body[key];
   if (!Object.keys(patch).length) return json({ error: "没有可保存的字段" }, 400);
@@ -255,7 +281,8 @@ async function patchKeys(rt: Runtime, chatId: number, body: Record<string, unkno
   return json({ ok: true, changed: Object.keys(patch), config: saved.config });
 }
 
-export type Identity = { ok: true; via: "cookie" | "telegram"; userId?: number } | { ok: false; error: string };
+export type Identity =
+  { ok: true; via: "cookie" | "telegram"; userId?: number } | { ok: false; error: string };
 
 /**
  * Who is calling? Mini App header first, cookie second.
@@ -270,7 +297,10 @@ async function identity(request: Request, env: Env, rt: Runtime): Promise<Identi
   if (initData) {
     const check = await verifyInitData(initData, env.BOT_TOKEN ?? "", rt.now());
     if (!check.ok) return { ok: false, error: check.error };
-    const allowed = await authorizeConsoleUser({ env, api: rt.api, db: rt.db, now: rt.now }, check.user.id);
+    const allowed = await authorizeConsoleUser(
+      { env, api: rt.api, db: rt.db, now: rt.now },
+      check.user.id,
+    );
     if (!allowed) return { ok: false, error: "这个 Telegram 账号不是本机器人的管理员" };
     return { ok: true, via: "telegram", userId: check.user.id };
   }
@@ -316,10 +346,12 @@ async function botRightsFor(rt: Runtime, botId: number, chatId: number): Promise
   let rights: BotRights = { admin: false, delete: false, restrict: false, pin: false };
   if (botId) {
     const res = await rt.api
-      .call<{ status?: string; can_delete_messages?: boolean; can_restrict_members?: boolean; can_pin_messages?: boolean }>(
-        "getChatMember",
-        { chat_id: chatId, user_id: botId },
-      )
+      .call<{
+        status?: string;
+        can_delete_messages?: boolean;
+        can_restrict_members?: boolean;
+        can_pin_messages?: boolean;
+      }>("getChatMember", { chat_id: chatId, user_id: botId })
       .catch(() => null);
     const member = res && res.ok ? res.result : null;
     if (member) {
@@ -338,7 +370,12 @@ async function botRightsFor(rt: Runtime, botId: number, chatId: number): Promise
   return rights;
 }
 
-export async function handleApi(request: Request, env: Env, rt: Runtime, url: URL): Promise<Response> {
+export async function handleApi(
+  request: Request,
+  env: Env,
+  rt: Runtime,
+  url: URL,
+): Promise<Response> {
   const path = url.pathname.replace(/\/+$/, "");
 
   if (path === "/api/login/request" && request.method === "POST") {
@@ -353,7 +390,12 @@ export async function handleApi(request: Request, env: Env, rt: Runtime, url: UR
     if (loginRequests.size > 4_000) loginRequests.clear();
     const code = newLoginCode();
     await issueLoginCode(rt, code);
-    return json({ ok: true, code, bot: String(env.BOT_USERNAME ?? "").replace(/^@/, ""), ttl: LOGIN_CODE_TTL_S });
+    return json({
+      ok: true,
+      code,
+      bot: String(env.BOT_USERNAME ?? "").replace(/^@/, ""),
+      ttl: LOGIN_CODE_TTL_S,
+    });
   }
 
   if (path === "/api/login/status" && request.method === "GET") {
@@ -389,18 +431,33 @@ export async function handleApi(request: Request, env: Env, rt: Runtime, url: UR
     if (body.initData) {
       const check = await verifyInitData(body.initData, env.BOT_TOKEN ?? "", rt.now());
       if (!check.ok) return json({ error: check.error }, 401);
-      if (!(await authorizeConsoleUser({ env, api: rt.api, db: rt.db, now: rt.now }, check.user.id))) {
+      if (
+        !(await authorizeConsoleUser({ env, api: rt.api, db: rt.db, now: rt.now }, check.user.id))
+      ) {
         return json({ error: "这个 Telegram 账号不是本机器人的管理员" }, 403);
       }
-      return json({ ok: true, via: "telegram", user: check.user }, 200, { "set-cookie": cookieHeader(await mintSession(env, rt.now())) });
+      // 会话必须携带身份：不带 userId 的裸 cookie 等于给任何普通群管理员
+      // 铸造全局 operator 会话（跨浏览器 12 小时有效）。
+      return json({ ok: true, via: "telegram", user: check.user }, 200, {
+        "set-cookie": cookieHeader(await mintSession(env, rt.now(), check.user.id)),
+      });
     }
 
     // Login code: the secret is the code itself, and it only works after an
     // admin approved it from Telegram — so no rate budget is charged here.
     const code = String(body.code ?? "").trim();
+    const codeIp = clientIp(request);
     if (/^\d{6}$/.test(code)) {
+      // 登录码空间只有 10^6 且未批准码不消耗：不做每 IP 尝试上限，
+      // 10 分钟 TTL 内可以被无成本爆破。命中上限后锁该 IP 到窗口重置。
+      if ((await loginFailures(rt, codeIp)) >= LOGIN_FAIL_MAX) {
+        return json({ error: "尝试太多次，请稍后再试" }, 429);
+      }
       const identity = await consumeLoginCode(rt, code);
-      if (!identity) return json({ error: "码不对、还没批准或已过期" }, 401);
+      if (!identity) {
+        await chargeFailure(rt, codeIp);
+        return json({ error: "码不对、还没批准或已过期" }, 401);
+      }
       return json(
         { ok: true, via: "code", user: { id: identity.userId, first_name: identity.name } },
         200,
@@ -410,7 +467,9 @@ export async function handleApi(request: Request, env: Env, rt: Runtime, url: UR
 
     const ip = clientIp(request);
     if ((await loginFailures(rt, ip)) >= LOGIN_FAIL_MAX) {
-      return json({ error: "尝试次数过多，请 10 分钟后再试" }, 429, { "retry-after": String(LOGIN_FAIL_WINDOW_S) });
+      return json({ error: "尝试次数过多，请 10 分钟后再试" }, 429, {
+        "retry-after": String(LOGIN_FAIL_WINDOW_S),
+      });
     }
 
     // One field for both: the console asks for "访问密码" and the operator may
@@ -427,7 +486,9 @@ export async function handleApi(request: Request, env: Env, rt: Runtime, url: UR
     }
 
     await clearFailures(rt, ip);
-    return json({ ok: true, via: "password" }, 200, { "set-cookie": cookieHeader(await mintSession(env, rt.now())) });
+    return json({ ok: true, via: "password" }, 200, {
+      "set-cookie": cookieHeader(await mintSession(env, rt.now())),
+    });
   }
 
   if (path === "/api/logout") {
@@ -450,7 +511,14 @@ function cookieHeader(value: string, maxAgeSeconds = SESSION_MS / 1000): string 
   return `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAgeSeconds}`;
 }
 
-async function route(request: Request, env: Env, rt: Runtime, url: URL, path: string, who: Identity): Promise<Response> {
+async function route(
+  request: Request,
+  env: Env,
+  rt: Runtime,
+  url: URL,
+  path: string,
+  who: Identity,
+): Promise<Response> {
   const operator = isOperator(rt, who);
 
   if (path === "/api/overview") {
@@ -465,13 +533,15 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       // that used to run here stays cheap.
       const mine: typeof chats = [];
       for (const chat of chats) {
-        if (who.ok && who.userId && (await rt.admin.isAdmin(chat.chatId, who.userId))) mine.push(chat);
+        if (who.ok && who.userId && (await rt.admin.isAdmin(chat.chatId, who.userId)))
+          mine.push(chat);
       }
       chats = mine;
       const since = rt.now() - 7 * 86_400_000;
       for (const chat of mine) {
         const stats = await chatStats(rt.db, chat.chatId, since);
-        for (const [kind, n] of Object.entries(stats.totals)) totals[kind] = (totals[kind] ?? 0) + n;
+        for (const [kind, n] of Object.entries(stats.totals))
+          totals[kind] = (totals[kind] ?? 0) + n;
       }
     }
 
@@ -513,7 +583,8 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
   if (chatMatch) {
     const chatId = Number(chatMatch[1]);
     const rest = chatMatch[2] ?? "";
-    if (!(await authorizeChat(rt, who, chatId))) return json({ error: "你不是这个群的管理员" }, 403);
+    if (!(await authorizeChat(rt, who, chatId)))
+      return json({ error: "你不是这个群的管理员" }, 403);
     // Personal sessions (login code / Mini App) attribute every write to the
     // person; the shared-password cookie stays anonymous (0).
     const actorId = who.ok && who.userId ? who.userId : 0;
@@ -555,7 +626,10 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit") ?? 20) || 20, 100));
       const offset = Math.max(0, Number(url.searchParams.get("offset") ?? 0) || 0);
       const kindParam = String(url.searchParams.get("kind") ?? "").trim();
-      const rows = await recentEvents(rt.db, chatId, limit + 1, { offset, kind: kindParam || undefined });
+      const rows = await recentEvents(rt.db, chatId, limit + 1, {
+        offset,
+        kind: kindParam || undefined,
+      });
       return json({ events: rows.slice(0, limit), hasMore: rows.length > limit, offset });
     }
 
@@ -590,7 +664,9 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
         applied += 1;
       }
       for (const row of Array.isArray(body.notes) ? body.notes : []) {
-        const name = String(row?.name ?? "").toLowerCase().slice(0, 40);
+        const name = String(row?.name ?? "")
+          .toLowerCase()
+          .slice(0, 40);
         const content = String(row?.content ?? "").slice(0, 3500);
         if (!name || !content) continue;
         await noteSave(rt.db, { chatId, name, content, createdBy: byId, at: rt.now() });
@@ -657,10 +733,22 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
         });
       } else {
         const banned = await rt.api.call("banChatMember", { chat_id: chatId, user_id: userId });
-        res = banned.ok ? await rt.api.call("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: true }) : banned;
+        res = banned.ok
+          ? await rt.api.call("unbanChatMember", {
+              chat_id: chatId,
+              user_id: userId,
+              only_if_banned: true,
+            })
+          : banned;
       }
       if (!res.ok) return json({ error: res.error }, 502);
-      await record(rt, { chatId, userId, kind: action === "kick" ? "kick" : "mute", reason: `后台${action === "kick" ? "移出" : action === "mute" ? "禁言" : "解除禁言"}`, byId: actorId });
+      await record(rt, {
+        chatId,
+        userId,
+        kind: action === "kick" ? "kick" : "mute",
+        reason: `后台${action === "kick" ? "移出" : action === "mute" ? "禁言" : "解除禁言"}`,
+        byId: actorId,
+      });
       return json({ ok: true });
     }
 
@@ -670,7 +758,13 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
     // validates what survives.
     if (rest === "ai" && (request.method === "POST" || request.method === "PATCH")) {
       const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-      return patchKeys(rt, chatId, body, ["ai", "aiProvider", "aiMinScore", "aiDailyBudget", "aiCategories"]);
+      return patchKeys(rt, chatId, body, [
+        "ai",
+        "aiProvider",
+        "aiMinScore",
+        "aiDailyBudget",
+        "aiCategories",
+      ]);
     }
     if (rest === "parse" && (request.method === "POST" || request.method === "PATCH")) {
       const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
@@ -678,12 +772,21 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
     }
     if (rest === "keywords" && (request.method === "POST" || request.method === "PATCH")) {
       const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-      return patchKeys(rt, chatId, body, ["keywordAction", "keywordPatterns", "keywords", "adWhitelist"]);
+      return patchKeys(rt, chatId, body, [
+        "keywordAction",
+        "keywordPatterns",
+        "keywords",
+        "adWhitelist",
+      ]);
     }
     if (rest === "words" && request.method === "GET") {
       const day = dayKey(rt.now(), rt.tzOffset);
       const days = Math.max(1, Math.min(Number(url.searchParams.get("days") ?? 7) || 7, 30));
-      return json({ day, top: await wordTop(rt.db, chatId, day, 30), totals: await wordDayTotals(rt.db, chatId, days) });
+      return json({
+        day,
+        top: await wordTop(rt.db, chatId, day, 30),
+        totals: await wordDayTotals(rt.db, chatId, days),
+      });
     }
 
     if (rest === "config" && (request.method === "PATCH" || request.method === "POST")) {
@@ -693,14 +796,25 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       const current = await rt.configFor(chatId);
       const saved = await rt.saveConfig(chatId, patch);
       if (saved.error) return json({ error: saved.error }, 400);
-      return json({ config: saved.config, changed: Object.keys(patch).filter((key) => (current as never)[key] !== (saved.config as never)[key]) });
+      return json({
+        config: saved.config,
+        changed: Object.keys(patch).filter(
+          (key) => (current as never)[key] !== (saved.config as never)[key],
+        ),
+      });
     }
 
     if (rest.startsWith("note/") && request.method === "PUT") {
       const name = decodeURIComponent(rest.slice(5)).toLowerCase().slice(0, 40);
       const body = (await request.json().catch(() => ({}))) as { content?: string };
       if (!name || !body.content) return json({ error: "名字和内容都不能为空" }, 400);
-      await noteSave(rt.db, { chatId, name, content: String(body.content).slice(0, 3500), createdBy: actorId, at: rt.now() });
+      await noteSave(rt.db, {
+        chatId,
+        name,
+        content: String(body.content).slice(0, 3500),
+        createdBy: actorId,
+        at: rt.now(),
+      });
       return json({ ok: true });
     }
     if (rest.startsWith("note/") && request.method === "DELETE") {
@@ -709,9 +823,15 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
     }
 
     if (rest === "filter" && request.method === "POST") {
-      const body = (await request.json().catch(() => ({}))) as { trigger?: string; match?: string; response?: string };
+      const body = (await request.json().catch(() => ({}))) as {
+        trigger?: string;
+        match?: string;
+        response?: string;
+      };
       if (!body.trigger || !body.response) return json({ error: "触发词和回复都要填" }, 400);
-      const mode = ["exact", "prefix", "regex"].includes(String(body.match)) ? String(body.match) : "exact";
+      const mode = ["exact", "prefix", "regex"].includes(String(body.match))
+        ? String(body.match)
+        : "exact";
       await filterAdd(rt.db, {
         chatId,
         trigger: String(body.trigger).slice(0, 200),
@@ -731,7 +851,13 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       const body = (await request.json().catch(() => ({}))) as { userId?: number; reason?: string };
       const userId = Number(body.userId);
       if (!Number.isFinite(userId) || userId === 0) return json({ error: "userId 不合法" }, 400);
-      await blockAdd(rt.db, { chatId, userId, reason: String(body.reason ?? "后台屏蔽"), byId: actorId, at: rt.now() });
+      await blockAdd(rt.db, {
+        chatId,
+        userId,
+        reason: String(body.reason ?? "后台屏蔽"),
+        byId: actorId,
+        at: rt.now(),
+      });
       return json({ ok: true });
     }
     if (rest.startsWith("block/") && request.method === "DELETE") {
@@ -740,7 +866,10 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
     }
 
     if (rest === "sync" && request.method === "POST") {
-      const body = (await request.json().catch(() => ({}))) as { source?: string; interval?: number };
+      const body = (await request.json().catch(() => ({}))) as {
+        source?: string;
+        interval?: number;
+      };
       const source = normalizeChannel(String(body.source ?? ""));
       if (!source) return json({ error: "频道用户名不合法" }, 400);
       const interval = Math.max(0, Math.min(Number(body.interval ?? 300) || 0, 86_400));
@@ -764,7 +893,13 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
       const body = (await request.json().catch(() => ({}))) as { text?: string; every?: number };
       if (!body.text) return json({ error: "内容不能为空" }, 400);
       const every = Math.max(0, Math.min(Number(body.every ?? 0) || 0, 30 * 86_400));
-      await scheduleAdd(rt.db, { chatId, text: String(body.text).slice(0, 3000), every, nextAt: rt.now() + 60_000, createdBy: actorId });
+      await scheduleAdd(rt.db, {
+        chatId,
+        text: String(body.text).slice(0, 3000),
+        every,
+        nextAt: rt.now() + 60_000,
+        createdBy: actorId,
+      });
       return json({ ok: true });
     }
   }
@@ -779,7 +914,12 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
     }
     if (request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as { enabled?: boolean };
-      await scheduleToggle(rt.db, id, body.enabled !== false, body.enabled === false ? undefined : rt.now() + 60_000);
+      await scheduleToggle(
+        rt.db,
+        id,
+        body.enabled !== false,
+        body.enabled === false ? undefined : rt.now() + 60_000,
+      );
       return json({ ok: true });
     }
   }
@@ -827,7 +967,10 @@ async function route(request: Request, env: Env, rt: Runtime, url: URL, path: st
 
   if (path === "/api/health") {
     if (!operator) return json({ error: "只有部署操作员能访问健康面板" }, 403);
-    return json({ health: await healthAll(rt.db), env: { bot: Boolean(env.BOT_TOKEN), db: Boolean(env.DB), admin: Boolean(env.ADMIN_TOKEN) } });
+    return json({
+      health: await healthAll(rt.db),
+      env: { bot: Boolean(env.BOT_TOKEN), db: Boolean(env.DB), admin: Boolean(env.ADMIN_TOKEN) },
+    });
   }
 
   return json({ error: "not found" }, 404);

@@ -18,6 +18,7 @@
  * the Mini App, so the second half of this file answers "is this user one of
  * our admins", cached because it costs a Bot API call per chat.
  */
+import { safeEqual } from "../telegram.ts";
 import type { Db } from "../db/repo.ts";
 import { listChats } from "../db/repo.ts";
 import type { Telegram } from "../telegram.ts";
@@ -39,8 +40,7 @@ export type TgInitUser = {
 };
 
 export type InitDataCheck =
-  | { ok: true; user: TgInitUser; authDate: number }
-  | { ok: false; error: string };
+  { ok: true; user: TgInitUser; authDate: number } | { ok: false; error: string };
 
 /**
  * Copy into a fresh ArrayBuffer before handing it to WebCrypto. A bare
@@ -113,11 +113,14 @@ export async function verifyInitData(
 
   const secret = await hmacSha256("WebAppData", botToken);
   const expected = toHex(await hmacSha256(secret, dataCheckString));
-  if (expected.length !== hash.length || expected !== hash) return { ok: false, error: "initData 签名不对" };
+  if (expected.length !== hash.length || !safeEqual(expected, hash))
+    return { ok: false, error: "initData 签名不对" };
 
   const authDate = Number(fields.get("auth_date") ?? 0);
-  if (!Number.isFinite(authDate) || authDate <= 0) return { ok: false, error: "initData 缺少 auth_date" };
-  if (nowMs - authDate * 1000 > maxAgeMs) return { ok: false, error: "initData 已过期，请重新打开" };
+  if (!Number.isFinite(authDate) || authDate <= 0)
+    return { ok: false, error: "initData 缺少 auth_date" };
+  if (nowMs - authDate * 1000 > maxAgeMs)
+    return { ok: false, error: "initData 已过期，请重新打开" };
 
   // `user` is already decoded by parseInitData; decoding twice would mangle a
   // name containing '%'.
@@ -127,7 +130,8 @@ export async function verifyInitData(
   } catch {
     user = null;
   }
-  if (!user || !Number.isFinite(user.id) || user.id <= 0) return { ok: false, error: "initData 缺少用户" };
+  if (!user || !Number.isFinite(user.id) || user.id <= 0)
+    return { ok: false, error: "initData 缺少用户" };
 
   return { ok: true, user, authDate };
 }
@@ -157,7 +161,10 @@ export function staticAdminIds(env: Env): number[] {
  * a creator/administrator in any group the bot knows, newest first — the same
  * people who can run `/ban` in the group can manage it from the console.
  */
-export async function authorizeConsoleUser(deps: ConsoleAuthDeps, userId: number): Promise<boolean> {
+export async function authorizeConsoleUser(
+  deps: ConsoleAuthDeps,
+  userId: number,
+): Promise<boolean> {
   if (!Number.isFinite(userId) || userId <= 0) return false;
   if (staticAdminIds(deps.env).includes(userId)) return true;
 

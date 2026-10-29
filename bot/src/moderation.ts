@@ -38,7 +38,11 @@ export async function restrict(
   return rt.api.call<true>("restrictChatMember", body);
 }
 
-export async function silence(rt: Runtime, chatId: number, userId: number): Promise<TgResult<true>> {
+export async function silence(
+  rt: Runtime,
+  chatId: number,
+  userId: number,
+): Promise<TgResult<true>> {
   return restrict(rt, chatId, userId, 0);
 }
 
@@ -58,13 +62,28 @@ export async function unmute(rt: Runtime, chatId: number, userId: number): Promi
  * same deployment protected for free. The remote federation is opt-in per chat
  * and never blocks the ban itself.
  */
-export async function recordBan(rt: Runtime, config: ChatConfig, userId: number, reason: string, source = "local"): Promise<void> {
+export async function recordBan(
+  rt: Runtime,
+  config: ChatConfig,
+  userId: number,
+  reason: string,
+  source = "local",
+): Promise<void> {
   await banAdd(rt.db, { userId, reason, source, at: rt.now() }).catch(() => undefined);
   if (config.federation) await rt.screener.report(userId, reason).catch(() => false);
 }
 
-export async function ban(rt: Runtime, chatId: number, userId: number, minutes = 0): Promise<TgResult<true>> {
-  const body: Record<string, unknown> = { chat_id: chatId, user_id: userId, revoke_messages: false };
+export async function ban(
+  rt: Runtime,
+  chatId: number,
+  userId: number,
+  minutes = 0,
+): Promise<TgResult<true>> {
+  const body: Record<string, unknown> = {
+    chat_id: chatId,
+    user_id: userId,
+    revoke_messages: false,
+  };
   const until = untilDate(rt.now(), minutes * 60);
   if (until) body.until_date = until;
   return rt.api.call<true>("banChatMember", body);
@@ -74,17 +93,29 @@ export async function ban(rt: Runtime, chatId: number, userId: number, minutes =
 export async function kick(rt: Runtime, chatId: number, userId: number): Promise<TgResult<true>> {
   const banned = await ban(rt, chatId, userId);
   if (!banned.ok) return banned;
-  const res = await rt.api.call<true>("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: true });
+  const res = await rt.api.call<true>("unbanChatMember", {
+    chat_id: chatId,
+    user_id: userId,
+    only_if_banned: true,
+  });
   return res.ok ? { ok: true, result: true } : res;
 }
 
 export async function unban(rt: Runtime, chatId: number, userId: number): Promise<TgResult<true>> {
-  const res = await rt.api.call<true>("unbanChatMember", { chat_id: chatId, user_id: userId, only_if_banned: false });
+  const res = await rt.api.call<true>("unbanChatMember", {
+    chat_id: chatId,
+    user_id: userId,
+    only_if_banned: false,
+  });
   await unmute(rt, chatId, userId);
   return res;
 }
 
-export async function deleteMessages(rt: Runtime, chatId: number, ids: number[]): Promise<TgResult<true>> {
+export async function deleteMessages(
+  rt: Runtime,
+  chatId: number,
+  ids: number[],
+): Promise<TgResult<true>> {
   if (!ids.length) return { ok: true, result: true };
   if (ids.length === 1) {
     return rt.api.call<true>("deleteMessage", { chat_id: chatId, message_id: ids[0] });
@@ -106,7 +137,17 @@ export type LogEntry = {
   kind?: string;
 };
 
-export async function record(rt: Runtime, entry: { chatId: number; userId?: number; kind: string; reason?: string; minutes?: number; byId?: number }): Promise<void> {
+export async function record(
+  rt: Runtime,
+  entry: {
+    chatId: number;
+    userId?: number;
+    kind: string;
+    reason?: string;
+    minutes?: number;
+    byId?: number;
+  },
+): Promise<void> {
   try {
     await logEvent(rt.db, {
       chatId: entry.chatId,
@@ -135,7 +176,9 @@ export async function logAction(rt: Runtime, config: ChatConfig, entry: LogEntry
 
   const target = config.logChatId || rt.env.LOG_CHAT_ID || "";
   if (!target) return;
-  const who = entry.user ? `${escapeHtml(displayName(entry.user))} (<code>${entry.user.id}</code>)` : "未知";
+  const who = entry.user
+    ? `${escapeHtml(displayName(entry.user))} (<code>${entry.user.id}</code>)`
+    : "未知";
   const lines = [
     `<b>${escapeHtml(entry.action)}</b>`,
     `群：${escapeHtml(entry.chat.title || String(entry.chat.id))}`,
@@ -163,7 +206,8 @@ export async function say(
   const body: Record<string, unknown> = { chat_id: chatId, text };
   if (options.html) body.parse_mode = "HTML";
   if (options.markup) body.reply_markup = options.markup;
-  if (options.replyTo) body.reply_parameters = { message_id: options.replyTo, allow_sending_without_reply: true };
+  if (options.replyTo)
+    body.reply_parameters = { message_id: options.replyTo, allow_sending_without_reply: true };
   return rt.api.call<{ message_id: number }>("sendMessage", body);
 }
 
@@ -217,7 +261,8 @@ export async function punishAuto(
   }
 
   if (!author) {
-    if (acted) await logAction(rt, config, { chat: msg.chat, action: "删除", reason, kind: "delete" });
+    if (acted)
+      await logAction(rt, config, { chat: msg.chat, action: "删除", reason, kind: "delete" });
     return { acted, errors };
   }
 
@@ -226,8 +271,20 @@ export async function punishAuto(
 
   if (strike) {
     await applyStrike(rt, msg.chat.id, author, strike, reason, count, config);
+    // 文件头承诺「每个动作都进日志频道」：阶梯自动处置同样要写 /logs，
+    // 否则管理员事后无从追溯机器人为什么动了人。
+    await logAction(rt, config, {
+      chat: msg.chat,
+      user: author,
+      action: `自动处置（第 ${count} 次违规）：${describeStrike(strike)}`,
+      reason,
+      kind: strike.action === "ban" ? "ban" : strike.action === "kick" ? "kick" : "mute",
+      minutes: strike.minutes,
+    });
     if (shouldAnnounce(rt, msg.chat.id, rt.now())) {
-      await say(rt, msg.chat.id, `已处理：${escapeHtml(reason)}（${describeStrike(strike)}）`, { html: true });
+      await say(rt, msg.chat.id, `已处理：${escapeHtml(reason)}（${describeStrike(strike)}）`, {
+        html: true,
+      });
     }
     return { acted: true, errors };
   }
@@ -248,7 +305,12 @@ export async function punishAuto(
   await logAction(rt, config, {
     chat: msg.chat,
     user: author,
-    action: config.spamAction === "ban" ? "自动封禁" : config.spamAction === "mute" ? `自动禁言 ${config.muteMinutes} 分钟` : "删除消息",
+    action:
+      config.spamAction === "ban"
+        ? "自动封禁"
+        : config.spamAction === "mute"
+          ? `自动禁言 ${config.muteMinutes} 分钟`
+          : "删除消息",
     reason,
     minutes: config.spamAction === "mute" ? config.muteMinutes : undefined,
     kind: config.spamAction === "ban" ? "ban" : config.spamAction === "mute" ? "mute" : "delete",
@@ -271,7 +333,11 @@ async function applyStrike(
     if (!res.ok) {
       // Telegram refused (usually: not a member any more). Recording a ban that
       // never happened would make /stats lie, which is worse than a gap.
-      await record(rt, { ...base, kind: "external", reason: `${base.reason}｜封禁失败：${res.error}` });
+      await record(rt, {
+        ...base,
+        kind: "external",
+        reason: `${base.reason}｜封禁失败：${res.error}`,
+      });
       return;
     }
     await recordBan(rt, configForStrike, author.id, reason);
@@ -281,7 +347,11 @@ async function applyStrike(
   }
   if (strike.action === "kick") {
     const res = await kick(rt, chatId, author.id);
-    await record(rt, { ...base, kind: res.ok ? "kick" : "external", reason: res.ok ? base.reason : `${base.reason}｜移出失败：${res.error}` });
+    await record(rt, {
+      ...base,
+      kind: res.ok ? "kick" : "external",
+      reason: res.ok ? base.reason : `${base.reason}｜移出失败：${res.error}`,
+    });
     return;
   }
   if (strike.action === "mute" && strike.minutes > 0) {
@@ -305,11 +375,17 @@ async function applyStrike(
  * The message is gone either way — a mute that leaves the spam visible is not a
  * moderation action.
  */
-export async function muteFor(rt: Runtime, msg: TgMessage, minutes: number, reason: string): Promise<PunishResult> {
+export async function muteFor(
+  rt: Runtime,
+  msg: TgMessage,
+  minutes: number,
+  reason: string,
+): Promise<PunishResult> {
   const errors: string[] = [];
   const removed = await deleteMessages(rt, msg.chat.id, [msg.message_id]);
   if (!removed.ok && removed.code !== 400) errors.push(removed.error);
-  if (removed.ok) await record(rt, { chatId: msg.chat.id, userId: msg.from?.id, kind: "delete", reason });
+  if (removed.ok)
+    await record(rt, { chatId: msg.chat.id, userId: msg.from?.id, kind: "delete", reason });
 
   const author = msg.from;
   if (!author) return { acted: removed.ok, errors };

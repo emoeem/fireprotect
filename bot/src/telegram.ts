@@ -47,7 +47,11 @@ export class Telegram {
   constructor(
     token: string,
     fetchImpl?: FetchLike,
-    options: { timeoutMs?: number; maxAttempts?: number; sleep?: (ms: number) => Promise<void> } = {},
+    options: {
+      timeoutMs?: number;
+      maxAttempts?: number;
+      sleep?: (ms: number) => Promise<void>;
+    } = {},
   ) {
     this.token = token;
     this.fetchImpl = fetchImpl ?? ((input, init) => fetch(input, init));
@@ -77,18 +81,29 @@ export class Telegram {
    * 20 MB at all, and a hung download inside a Worker loses the update. Both
    * are checked here so callers only deal with bytes.
    */
-  async download(fileId: string, maxBytes = 20 * 1024 * 1024): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error: string }> {
-    const info = await this.call<{ file_path?: string; file_size?: number }>("getFile", { file_id: fileId });
+  async download(
+    fileId: string,
+    maxBytes = 20 * 1024 * 1024,
+  ): Promise<{ ok: true; bytes: Uint8Array } | { ok: false; error: string }> {
+    const info = await this.call<{ file_path?: string; file_size?: number }>("getFile", {
+      file_id: fileId,
+    });
     if (!info.ok) return { ok: false, error: info.error };
     const size = Number(info.result.file_size ?? 0);
-    if (size > maxBytes) return { ok: false, error: `文件 ${(size / 1048576).toFixed(1)}MB，超过 ${Math.round(maxBytes / 1048576)}MB 上限` };
+    if (size > maxBytes)
+      return {
+        ok: false,
+        error: `文件 ${(size / 1048576).toFixed(1)}MB，超过 ${Math.round(maxBytes / 1048576)}MB 上限`,
+      };
     const path = info.result.file_path;
     if (!path) return { ok: false, error: "Telegram 没有返回 file_path" };
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 25_000);
     try {
-      const response = await this.fetchImpl(`${this.fileBase}/${path}`, { signal: controller.signal });
+      const response = await this.fetchImpl(`${this.fileBase}/${path}`, {
+        signal: controller.signal,
+      });
       if (!response.ok) return { ok: false, error: `下载失败 HTTP ${response.status}` };
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (bytes.byteLength > maxBytes) return { ok: false, error: "下载结果超过大小上限" };
@@ -140,7 +155,9 @@ export class Telegram {
       const body: Record<string, unknown> = { chat_id: chatId, [field]: source.url };
       if (options.caption) body.caption = options.caption.slice(0, 1000);
       if (options.replyTo) {
-        body.reply_parameters = JSON.stringify({ message_id: options.replyTo, allow_sending_without_reply: true });
+        // body 就是 JSON 请求体：reply_parameters 必须是对象，stringify 后
+        // Telegram 收到字符串字段必返 400（Worker 预览封面因此永远发不出）。
+        body.reply_parameters = { message_id: options.replyTo, allow_sending_without_reply: true };
       }
       return this.call<{ message_id: number }>(method, body);
     }
@@ -149,10 +166,16 @@ export class Telegram {
     form.set("chat_id", String(chatId));
     if (options.caption) form.set("caption", options.caption.slice(0, 1000));
     if (options.replyTo) {
-      form.set("reply_parameters", JSON.stringify({ message_id: options.replyTo, allow_sending_without_reply: true }));
+      form.set(
+        "reply_parameters",
+        JSON.stringify({ message_id: options.replyTo, allow_sending_without_reply: true }),
+      );
     }
     // Slice the exact window: a subarray view is not a `BlobPart` on its own.
-    const view = source.bytes.buffer.slice(source.bytes.byteOffset, source.bytes.byteOffset + source.bytes.byteLength) as ArrayBuffer;
+    const view = source.bytes.buffer.slice(
+      source.bytes.byteOffset,
+      source.bytes.byteOffset + source.bytes.byteLength,
+    ) as ArrayBuffer;
     form.set(field, new Blob([view], { type: mimeFor(source.filename) }), source.filename);
 
     const controller = new AbortController();
@@ -172,7 +195,10 @@ export class Telegram {
     }
   }
 
-  async call<T = unknown>(method: string, body: Record<string, unknown> = {}): Promise<TgResult<T>> {
+  async call<T = unknown>(
+    method: string,
+    body: Record<string, unknown> = {},
+  ): Promise<TgResult<T>> {
     let last: TgErr = { ok: false, error: "BOT_TOKEN 未设置", code: 0 };
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       const res = await this.once<T>(method, body);
@@ -183,7 +209,9 @@ export class Telegram {
       if (!transient || attempt === this.maxAttempts) return res;
 
       // `retry_after` is authoritative; the fallback backoff is exponential.
-      const waitMs = res.retryAfter ? Math.min(res.retryAfter, 20) * 1000 : Math.min(2 ** attempt * 500, 4000);
+      const waitMs = res.retryAfter
+        ? Math.min(res.retryAfter, 20) * 1000
+        : Math.min(2 ** attempt * 500, 4000);
       await this.sleep(waitMs);
     }
     return last;
