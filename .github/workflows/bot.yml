@@ -48,6 +48,10 @@ jobs:
       - name: Install bot dependencies
         run: npm install --no-audit --no-fund
         working-directory: bot
+      - name: Install fixture tools
+        # qpdf writes the genuinely encrypted PDF the /splitpdf tests assert on;
+        # without it that case skips, which is fine but misses real coverage.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq qpdf
       - name: Verify (typecheck, lint, coverage gate)
         # Output goes to a file so a failure can be summarised in a few lines:
         # the full TAP stream exceeds GitHub's per-step log budget and gets

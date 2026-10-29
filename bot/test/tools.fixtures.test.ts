@@ -78,7 +78,14 @@ test("a one-page PDF is refused with a reason, not an empty send", async () => {
   assert.match(texts(h).join("\n"), /只有一页/);
 });
 
-test("an encrypted PDF is named as such instead of dumping a parser error", async () => {
+test("an encrypted PDF is named as such instead of dumping a parser error", async (t) => {
+  // Real encryption needs qpdf, which a bare CI image does not ship. The
+  // fixture generator leaves the file out in that case — skip loudly instead of
+  // asserting against something that was never written.
+  if (!existsSync(join(dir, "pdf-encrypted.pdf"))) {
+    t.skip("qpdf 不可用，跳过加密 PDF 用例（装 qpdf 后会自动跑）");
+    return;
+  }
   const { h, bytes, doc } = await documentReply("pdf-encrypted.pdf");
   assert.equal(looksEncrypted(bytes), true, "fixture must really be encrypted");
   await assert.rejects(() => pdfPageCount(bytes), "pdf-lib cannot read it either");
