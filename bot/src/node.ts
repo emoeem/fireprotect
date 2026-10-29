@@ -13,6 +13,7 @@ import { sweepExpired } from "./handlers/verify.ts";
 import { runSync } from "./sync.ts";
 import { sliceImage } from "./tools/slice.node.ts";
 import { fetchWithYtdlp } from "./parse/ytdlp.node.ts";
+import { nodePdfRenderer } from "./pdf-render.node.ts";
 import { ocrImage } from "./tools/ocr.node.ts";
 import { nodeRssDeps } from "./rss.node.ts";
 import { pollFeeds } from "./rss.ts";
@@ -54,6 +55,8 @@ const runtime = createRuntime(env, {
   parseDownloader: (url) => fetchWithYtdlp(url),
   // tesseract is a subprocess, so `/ocr` only exists on a self-hosted node.
   ocr: (bytes) => ocrImage(bytes),
+  // poppler's pdftoppm: faster and more faithful than the Worker's WASM build.
+  pdfRender: nodePdfRenderer,
   // rss-parser assumes Node globals; the Worker has neither it nor a scheduler.
   rssParse: nodeRssDeps().parse,
 });

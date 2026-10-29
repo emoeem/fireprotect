@@ -25,6 +25,7 @@ import type { SqliteHandle } from "./db/connect.ts";
 import type { Env, Store, TgChatPermissions, TgUser } from "./types.ts";
 import type { OcrEngine } from "./ocr.ts";
 import type { FeedParser } from "./rss.ts";
+import type { PdfRenderer } from "./pdf-render.ts";
 
 const CONFIG_TTL_MS = 60_000;
 const ADMIN_TTL_MS = 10 * 60_000;
@@ -96,11 +97,18 @@ export type Runtime = {
    * preview instead of failing: the capability decides the behaviour.
    */
   parseDownloader?: ParseDownloader;
+  /**
+   * PDF → per-page PNGs, injected by both entries with different engines: the
+   * Node runner shells out to poppler, the Worker renders with a WASM PDFium
+   * build served from Assets. Absent means "this deployment cannot render".
+   */
+  pdfRender?: PdfRenderer;
 };
 
 export type RuntimeDeps = {
   sliceImage?: Runtime["sliceImage"];
   ocr?: Runtime["ocr"];
+  pdfRender?: Runtime["pdfRender"];
   rssParse?: Runtime["rssParse"];
   parseDownloader?: ParseDownloader;
   store?: Store;
@@ -170,6 +178,7 @@ export function createRuntime(env: Env, deps: RuntimeDeps & { sqlite: SqliteHand
     initialized,
     sliceImage: deps.sliceImage,
     ocr: deps.ocr,
+    pdfRender: deps.pdfRender,
     rssParse: deps.rssParse,
     parseDownloader: deps.parseDownloader,
 

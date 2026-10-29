@@ -105,6 +105,12 @@ export const configSchema = z.object({
   /** Daily hot-word counting. Cheap, but a group may not want it. */
   hotWords: z.boolean().default(true),
 
+  // --- PDF → images ---------------------------------------------------------
+  /** Turn an incoming PDF into per-page images, so it reads on a phone. */
+  pdfAutoImages: z.boolean().default(false),
+  /** Skip (and say so) above this size: a huge PDF is a slow render, not a chat message. */
+  pdfAutoMaxKb: z.number().int().min(0).max(20_480).default(8_192),
+
   // --- flood ----------------------------------------------------------------
   floodLimit: z.number().int().min(0).max(60).default(0),
   floodWindow: z.number().int().min(3).max(3600).default(10),
@@ -190,6 +196,8 @@ export const SETTABLE: Record<string, string> = {
   parseAuto: "on/off — 自动解析群里的抖音/小红书/推特/B站链接",
   parsePerHour: "次 — 每群每小时解析上限",
   hotWords: "on/off — 每日热词统计",
+  pdfAutoImages: "on/off — 收到 PDF 时自动转成每页一张图片（适合手机阅读）",
+  pdfAutoMaxKb: "KB，0=不限 — 超过这个大小的 PDF 不自动转（最大 20480）",
   logChatId: "频道/群数字 ID，或 off",
 };
 

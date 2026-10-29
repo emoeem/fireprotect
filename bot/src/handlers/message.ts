@@ -24,6 +24,10 @@ import { bumpWords } from "../ai/words.ts";
 import { allowParse, enqueueParse, runParseJob } from "../parse/service.ts";
 import { firstSupported } from "../parse/sites.ts";
 import { bumpMemberStat, touchMember } from "../members.ts";
+import { PDF_RENDER_MAX_BYTES, PDF_RENDER_MAX_PAGES, PDF_RENDER_WIDTH, isPdfDocument, pageCaption } from "../pdf-render.ts";
+import { allowTool } from "../tools/index.ts";
+import { toolLog } from "../db/repo.ts";
+import type { ChatConfig } from "../rules.ts";
 import { inNightWindow } from "../nightmode.ts";
 import { deleteMessages, muteFor, punishAuto, record, say } from "../moderation.ts";
 import { blocked } from "../block.ts";
@@ -174,8 +178,16 @@ export async function handleMessage(rt: Runtime, msg: TgMessage): Promise<void> 
   void touchMember(rt, chatId, from);
   void bumpMemberStat(rt, chatId, from.id);
 
-  // 5d. optional auto-parse. Off by default because it costs a request per link
-  // and most groups would rather choose when to spend it. Failure is silent by
+  // 5c-b. PDF → per-page images. A phone cannot read a PDF comfortably; this
+  // turns the document into something you swipe through. Opt-in per group
+  // (`pdfAutoImages`) because it downloads and re-uploads every page, and it
+  // runs after every free rule so a blocked/locked message never pays for it.
+  if (config.pdfAutoImages && msg.document && isPdfDocument(msg.document)) {
+    await maybeRenderPdf(rt, msg, config);
+    return;
+  }
+
+  // 5d. optional auto-parse. Off by default because it costs a request per link  // and most groups would rather choose when to spend it. Failure is silent by
   // design: the original message is never touched.
   if (config.parseAuto) {
     const found = firstSupported(text, msg.entities ?? []);
@@ -227,6 +239,68 @@ export async function handleEditedMessage(rt: Runtime, msg: TgMessage): Promise<
   }
   await deleteMessages(rt, chatId, [msg.message_id]);
   await record(rt, { chatId, userId: from.id, kind: "delete", reason: `编辑后命中：${verdict.reason}` });
+}
+
+/**
+ * Render a posted PDF into per-page images and send them back.
+ *
+ * Silence is the wrong default here: if the group asked for this, a member who
+ * posts a PDF deserves to know why nothing happened (too big, password-locked,
+ * or the deployment cannot render at all). Every early return therefore says
+ * something — except the size cap, which stays quiet when the file is simply
+ * bigger than the group configured, because that is the group's own rule.
+ */
+async function maybeRenderPdf(rt: Runtime, msg: TgMessage, config: ChatConfig): Promise<void> {
+  const doc = msg.document;
+  const from = msg.from;
+  if (!doc || !from) return;
+  const render = rt.pdfRender;
+  if (!render) {
+    await say(rt, msg.chat.id, "这个部署不能把 PDF 转成图片（Worker 需要重新部署带 PDF 引擎的版本）。", {
+      replyTo: msg.message_id,
+    });
+    return;
+  }
+  const maxKb = config.pdfAutoMaxKb;
+  const sizeKb = Math.ceil(Number(doc.file_size ?? 0) / 1024);
+  if (maxKb > 0 && sizeKb > maxKb) return; // the group's own ceiling: stay silent
+  // One member cannot turn this into a file-conversion service.
+  if (!allowTool(rt, from.id, 3, 5 * 60_000)) {
+    await say(rt, msg.chat.id, "转 PDF 太频繁了，过几分钟再试。", { replyTo: msg.message_id });
+    return;
+  }
+
+  const download = await rt.api.download(doc.file_id, PDF_RENDER_MAX_BYTES);
+  if (!download.ok) {
+    await say(rt, msg.chat.id, `PDF 下载失败：${download.error}`, { replyTo: msg.message_id });
+    return;
+  }
+
+  const rendered = await render(download.bytes, { width: PDF_RENDER_WIDTH, maxPages: PDF_RENDER_MAX_PAGES });
+  if (!rendered.ok) {
+    await say(rt, msg.chat.id, rendered.error, { replyTo: msg.message_id });
+    return;
+  }
+
+  let sent = 0;
+  for (const page of rendered.pages) {
+    const res = await rt.api.sendPhoto(msg.chat.id, page.data, `page-${page.page}.png`, {
+      replyTo: msg.message_id,
+      caption: pageCaption(page.page, rendered.total),
+    });
+    if (!res.ok) break;
+    sent += 1;
+  }
+  if (rendered.total > rendered.pages.length) {
+    await say(rt, msg.chat.id, `共 ${rendered.total} 页，这次只转前 ${rendered.pages.length} 页。`, {
+      replyTo: msg.message_id,
+    });
+  }
+  await toolStatsLog(rt, msg, "pdfimages", sent === rendered.pages.length, sent);
+}
+
+async function toolStatsLog(rt: Runtime, msg: TgMessage, tool: string, ok: boolean, count = 0): Promise<void> {
+  await toolLog(rt.db, { chatId: msg.chat.id, userId: msg.from?.id, tool, ok, bytes: count, at: rt.now() }).catch(() => undefined);
 }
 
 async function joinedAtOf(rt: Runtime, chatId: number, userId: number): Promise<number | undefined> {

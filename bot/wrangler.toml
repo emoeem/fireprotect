@@ -17,6 +17,16 @@ name = "flareward-bot"
 main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 
+# PDF → images: the WASM renderer (PDFium, BSD) must arrive as a compiled module.
+# Cloudflare refuses runtime instantiation from bytes ("Wasm code generation
+# disallowed by embedder"), so `assets/pdfium.wasm` is imported statically and
+# handed to Emscripten through instantiateWasm. It adds ~2.5 MB gzip to the
+# bundle; the free plan's 3 MB ceiling is tight, the paid plan is comfortable.
+[[rules]]
+type = "CompiledWasm"
+globs = ["**/*.wasm"]
+fallthrough = true
+
 workers_dev = true
 
 [[kv_namespaces]]

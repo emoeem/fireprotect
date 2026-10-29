@@ -61,6 +61,11 @@ export const FIELD_GROUPS: FieldGroup[] = [
     note: "默认关。开启后每条媒体都会调一次外部接口，按每日预算封顶，接口不可用时放行而不误删。",
   },
   { id: "media", title: "链接解析与热词" },
+  {
+    id: "tools",
+    title: "文档与工具箱",
+    note: "PDF 转图片要完整下载再渲染：手机上看 PDF 要不停缩放，转成每页一张图可以直接滑。",
+  },
   { id: "external", title: "外部名单与日志" },
 ];
 
@@ -173,6 +178,21 @@ export const FIELDS: FieldMeta[] = [
     hint: "群里人多时这类消息很吵，默认删。",
     group: "greet",
     kind: "switch",
+  },
+  {
+    key: "pdfAutoImages",
+    label: "PDF 自动转图片",
+    hint: "开：有人发 PDF 时自动转成每页一张图片，手机上直接滑动看。关：只在发 /splitpdf 时处理。",
+    group: "tools",
+    kind: "switch",
+  },
+  {
+    key: "pdfAutoMaxKb",
+    label: "自动转图的大小上限",
+    hint: "超过这个大小的 PDF 不自动转（0 = 不限）。转图要完整下载再渲染，大文件很慢。",
+    group: "tools",
+    kind: "number",
+    unit: "KB",
   },
 
   // --- content -------------------------------------------------------------

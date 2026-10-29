@@ -13,6 +13,7 @@ import { handleUpdate } from "./bot.ts";
 import { createRuntime, ensureSchema, type Runtime } from "./context.ts";
 import { openD1 } from "./db/d1.ts";
 import { kvStore } from "./store.ts";
+import { workerPdfRenderer } from "./pdf-render.worker.ts";
 import { handleInstall, healthBody, webhookSecret } from "./install.ts";
 import { sweepExpired } from "./handlers/verify.ts";
 import { handleApi } from "./admin/api.ts";
@@ -41,7 +42,7 @@ function runtimeFor(env: Env): Runtime {
   // verifications, login codes). Falling back to an in-memory store here would
   // "work" until the isolate recycles and silently wipe every group's settings —
   // which is exactly what production was doing before this line existed.
-  const runtime = createRuntime(env, { sqlite, store: kvStore(env.STORE) });
+  const runtime = createRuntime(env, { sqlite, store: kvStore(env.STORE), pdfRender: workerPdfRenderer() });
   cached = { env, runtime };
   return runtime;
 }

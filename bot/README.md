@@ -26,6 +26,7 @@ npm test && npm run typecheck && npm run lint  # 145 测试
 | `he` | HTML 实体转义 | 用户昵称进 `parse_mode: HTML` 时是注入面 |
 | `tldts` | 域名后缀解析 | 判断高风险 TLD 需要公共后缀表，正则做不对 |
 | `pdf-lib` | `/splitpdf` 按页拆分 | 纯 JS、无 `node:` 依赖，Worker 与本地共用同一份实现 |
+| `@hyzyla/pdfium` | **PDF 转图片**（`pdfAutoImages`） | MIT 许可的 PDFium WASM。wasm 走 `assets/pdfium.wasm` + wrangler 的 `CompiledWasm` 规则（Cloudflare 禁止运行时编译 wasm）；Node 端改用 poppler 的 `pdftoppm`，更快也更准 |
 | `sharp` | `/slice` 长图切分 | 原生库，**只被 `src/tools/slice.node.ts` 引用**，Worker bundle 里没有它（`wrangler deploy --dry-run` 后 grep `node:` / `sharp` 均为 0） |
 | `rss-parser` | `/rss` 订阅轮询 | 纯 JS，但假设 Node 全局；**只被 `src/rss.node.ts` 引用**，Worker 里既没有它也没有调度器 |
 
@@ -91,6 +92,10 @@ npm test && npm run typecheck && npm run lint  # 145 测试
 | `/words [天数]` | 今日热词与每日发言量 | 管理员 |
 
 任何人：`/tool` `/splitpdf`（回复 PDF）`/slice`（回复长图）`/expand t.me链接` `/ts 时间戳` `/parse（抖音/小红书/X/B站链接）`（`/ocr` 回复图片读文字需要管理员权限）
+
+**PDF 自动转图片**（`/set pdfAutoImages on`）：有人往群里发 PDF 时，机器人把每一页渲染成一张 1080px 宽的黑白 PNG 发回来——手机上直接滑动阅读，不用缩放。超过 `pdfAutoMaxKb`（默认 8MB）的文件不自动转；同一成员 5 分钟最多触发 3 次。整本 3 页的测试文档约 11KB。想手动拆分 PDF 用 `/splitpdf`，两者互不影响。
+
+> 部署提示：wasm 引擎让 Worker bundle 从 0.6MB 增至约 3.1MB（gzip）。免费版 Workers 上限 3MB，**这个功能需要付费版**；不需要的话删掉 `wrangler.toml` 里的 `CompiledWasm` 段并移除 `src/pdf-render.worker.ts` 的注入即可回到 0.6MB。
 
 ### 网页控制台的「规则」页
 

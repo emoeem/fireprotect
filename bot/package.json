@@ -21,6 +21,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@hyzyla/pdfium": "^3.0.0",
     "drizzle-orm": "^0.45.4",
     "he": "^2.0.0",
     "lru-cache": "^11.5.3",
