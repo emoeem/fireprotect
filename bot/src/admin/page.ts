@@ -170,7 +170,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     (children||[]).forEach(function(child){ if(child) node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child); });
     return node;
   }
-  function toast(msg){ var t=document.getElementById('toast'); t.textContent=msg; t.className='toast on'; setTimeout(function(){ t.className='toast'; }, 1800); }
+  function toast(msg){ var t=document.getElementById('toast'); t.textContent=msg; t.className='toast on'; t.setAttribute('aria-live','polite'); setTimeout(function(){ t.className='toast'; }, 1800); }
   function api(path, opts){
     opts = opts || {};
     opts.credentials = 'same-origin';
@@ -713,7 +713,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     var cfg = state.chat.config;
     var wrap = el('div', null);
 
-    var filter = el('input', {type:'search', placeholder:'搜索设置，例如「验证」或 captcha'});
+    var filter = el('input', {type:'search', placeholder:'搜索设置，例如「验证」或 captcha', 'aria-label':'搜索设置'});
     wrap.appendChild(el('div', {class:'card', style:'padding:10px'}, [
       filter,
       el('div', {class:'note', style:'margin:8px 0 0'}, ['改完立刻生效，不需要保存按钮。右上角的小字是给 /set 用的原始字段名。'])
@@ -782,6 +782,10 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     row.appendChild(controlFor(meta, value, err));
     if (meta.hint) row.appendChild(el('div', {class:'fhint'}, [meta.hint]));
     row.appendChild(err);
+    // 视觉标签在 .fhead 里，与控件没有程序化关联——屏幕阅读器会把每个输入
+    // 都读成无名控件。这里给控件补上 aria-label（aria-label 优先于 hint 文本）。
+    var ctrl = row.querySelector('.fwrap select, .fwrap input, .fwrap textarea, .fwrap button');
+    if (ctrl && !ctrl.getAttribute('aria-label')) ctrl.setAttribute('aria-label', meta.label || meta.key);
     return row;
   }
 
