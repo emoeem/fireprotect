@@ -96,6 +96,26 @@ canvas{width:100%;height:120px}
 .lrow .tag{font-size:11px;color:var(--muted);text-align:right}
 input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible{outline:2px solid #2b5c8a;outline-offset:1px}
 .savedbar{position:sticky;bottom:0;display:flex;gap:8px;align-items:center;padding:10px 0 4px;background:linear-gradient(180deg,rgba(11,15,20,0),#0b0f14 45%)}
+/* 触屏上的可点击元素要够到 44px：面板大量用在手机 Mini App 里，
+ * 7-11px padding 的按钮实际高度只有 ~30px，误触率高。 */
+@media (pointer: coarse) {
+  button,
+  .chip,
+  aside .item {
+    min-height: 44px;
+  }
+  .chip {
+    padding: 8px 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast,
+  .sw::after {
+    transition: none;
+  }
+}
+
 /* Mini App is a phone webview: a 260px fixed sidebar leaves 130px of正文 on a
    390px screen. Below 760px the sidebar becomes a横向 list on top, and the page
    respects the notch/home-indicator insets so the last row is not unreachable. */
@@ -157,7 +177,10 @@ input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-vis
     opts.headers = opts.headers || {};
     if (TG_INIT) opts.headers['x-telegram-init-data'] = TG_INIT;
     if (opts.body && typeof opts.body !== 'string') { opts.headers['content-type'] = 'application/json'; opts.body = JSON.stringify(opts.body); }
-    return fetch(path, opts).then(function(r){ return r.json().then(function(j){
+    return fetch(path, opts).catch(function(err){
+      // 网络层失败（断网/代理挂了）没有业务语义，原文对管理员是噪音
+      throw new Error('网络异常，请稍后重试');
+    }).then(function(r){ return r.json().then(function(j){
       if(!r.ok) {
         var e = new Error(j.error||('HTTP '+r.status)); e.status = r.status;
         // A session that expires mid-page used to leave every click dying with a
