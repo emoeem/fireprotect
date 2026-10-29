@@ -180,6 +180,13 @@ export const FIELDS: FieldMeta[] = [
     kind: "switch",
   },
   {
+    key: "autoApproveJoin",
+    label: "自动批准入群申请",
+    hint: "开启后 chat_join_request 直接放行（既有行为）；关闭由管理员手动处理申请。",
+    group: "greet",
+    kind: "switch",
+  },
+  {
     key: "pdfAutoImages",
     label: "PDF 自动转图片",
     hint: "开：有人发 PDF 时自动转成每页一张图片，手机上直接滑动看。关：只在发 /splitpdf 时处理。",

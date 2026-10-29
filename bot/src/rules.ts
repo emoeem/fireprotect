@@ -76,6 +76,8 @@ export const configSchema = z.object({
   farewell: z.boolean().default(false),
   farewellText: z.string().max(300).default("{name} 离开了 {chat}。"),
   deleteJoinMessages: z.boolean().default(true),
+  /** chat_join_request 是否自动批准（默认开 = 既有行为；关掉后由管理员手动放人）。 */
+  autoApproveJoin: z.boolean().default(true),
 
   // --- content rules --------------------------------------------------------
   keywords: z

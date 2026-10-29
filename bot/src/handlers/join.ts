@@ -26,8 +26,9 @@ export async function handleNewMembers(rt: Runtime, msg: TgMessage): Promise<voi
 
   // Raid check first: if a hundred people arrive in thirty seconds, the greeting
   // is noise and the lock is the answer.
-  if (config.joinRateMax > 0) {
-    const count = trackJoin(rt, chatId, config.joinRateWindow, rt.now());
+  if (config.joinRateMax > 0 && members.length > 0) {
+    // members 已经滤掉 bot：按真实人数计数，而不是按消息条数。
+    const count = trackJoin(rt, chatId, config.joinRateWindow, rt.now(), members.length);
     if (count === config.joinRateMax) {
       await onRaid(rt, chatId, config, count);
     }
@@ -189,6 +190,18 @@ export async function handleMyChatMember(rt: Runtime, update: TgChatMemberUpdate
  */
 export async function handleJoinRequest(rt: Runtime, update: NonNullable<import("../types.ts").TgUpdate["chat_join_request"]>): Promise<void> {
   const config = await rt.configFor(update.chat.id);
+  // 申请式入群同样计入 raid 计数：批量批准的拉人过去完全不进 flood 统计。
+  if (config.joinRateMax > 0) {
+    const count = trackJoin(rt, update.chat.id, config.joinRateWindow, rt.now(), 1);
+    if (count === config.joinRateMax) {
+      await onRaid(rt, update.chat.id, config, count);
+    }
+  }
+  // 自动批准有开关（默认开，保持既有行为）：关掉后机器人不再自动放人，
+  // 由群管理员手动处理申请——此前没有任何办法关掉这个行为。
+  if (!config.autoApproveJoin) {
+    return;
+  }
   const approved = await rt.api.call("approveChatJoinRequest", {
     chat_id: update.chat.id,
     user_id: update.from.id,
@@ -197,5 +210,4 @@ export async function handleJoinRequest(rt: Runtime, update: NonNullable<import(
     rememberJoin(rt, update.chat.id, update.from.id);
     await record(rt, { chatId: update.chat.id, userId: update.from.id, kind: "join", reason: "加入申请已批准" });
   }
-  void config;
 }

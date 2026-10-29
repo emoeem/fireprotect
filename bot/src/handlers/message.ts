@@ -109,6 +109,9 @@ export async function handleMessage(rt: Runtime, msg: TgMessage): Promise<void> 
   }
 
   // 3. admins are never filtered
+  // 匿名管理员的消息 from 是 GroupAnonymousBot、sender_chat 是群本身：
+  // isAdmin(bot-id) 必然 false，会照常吃验证/夜禁/处罚——先按群身份豁免。
+  if (msg.sender_chat && msg.sender_chat.id === chatId) return;
   if (await rt.admin.isAdmin(chatId, from.id)) return;
   // A bot that is not us: only the `bots` lock applies, and it is handled below.
   if (from.is_bot && !config.locks.includes("bots")) return;

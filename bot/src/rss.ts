@@ -35,7 +35,7 @@ import {
   rssFeedDelete,
   rssFeedGet,
   rssFeedList,
-  rssFeedMark,
+  rssFeedMark, rssFeedWatermark,
   rssPollable,
   type RssFeedRow,
 } from "./db/repo.ts";
@@ -643,6 +643,10 @@ async function pollOne(rt: Runtime, deps: RssDeps, row: RssFeedRow, now: number)
     }
     sent += 1;
     lastKey = itemKey(item);
+    // 每成功投递一条就把水位线落一次库：整批发完才落的老写法，在"发成功之后、
+    // 收尾落库之前"崩溃/断电的窗口里会把整批原样重发。轻量 UPDATE（只动
+    // last_key），收尾的 rssFeedMark 再补齐其余字段。
+    await rssFeedWatermark(rt.db, row.id, lastKey);
   }
 
   if (sent === 0 && error) return registerFailure(rt, row, `发送失败：${error}`, now);

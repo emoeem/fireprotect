@@ -41,12 +41,14 @@ export function trackFlood(
  * A raid is a burst, not a pattern, so the count is all that is needed: the
  * caller decides between "tell an admin" and "lock the group".
  */
-export function trackJoin(runtime: object, chatId: number, windowSeconds: number, nowMs: number): number {
+export function trackJoin(runtime: object, chatId: number, windowSeconds: number, nowMs: number, joined = 1): number {
   const joins = cachesFor(runtime).joins;
   const key = String(chatId);
   const windowMs = Math.max(5, windowSeconds) * 1000;
   const stamps = (joins.get(key) ?? []).filter((at) => nowMs - at < windowMs);
-  stamps.push(nowMs);
+  // joined = 这一次事件带来的真实人数：一条 new_chat_members 可能是批量拉人，
+  // 只记 1 会把 30 秒 100 人的 raid 数成 30 秒 10 人，触发线永远够不着。
+  for (let i = 0; i < Math.max(1, joined); i += 1) stamps.push(nowMs);
   joins.set(key, stamps.slice(-500));
   return stamps.length;
 }
